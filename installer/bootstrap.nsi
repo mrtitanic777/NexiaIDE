@@ -282,8 +282,12 @@ Section "Install"
   ; node_modules\*\src\ in the tree, 33 MB of unrelated packages.
   SetOutPath "$BuildDir\src"
   File /r "..\src\*.*"
+  ; /x icon-512.png: 376 KB, referenced nowhere in the project. PNG is already
+  ; compressed, so it survives LZMA intact — it was a third of the download,
+  ; shipped to every user, for nothing. icon.png IS used (main.ts sets it as the
+  ; window icon) and icon.ico is what rcedit stamps onto the exe.
   SetOutPath "$BuildDir\resources"
-  File /r "..\resources\*.*"
+  File /r /x icon-512.png "..\resources\*.*"
   SetOutPath "$BuildDir\scripts"
   File "..\scripts\copy-assets.js"
   SetOutPath "$BuildDir"
