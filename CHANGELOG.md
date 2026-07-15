@@ -1,5 +1,36 @@
 # Changelog
 
+## v2.2.7
+
+### Fixed
+- **The AI is no longer prompted when you open the IDE.** Startup fired a "welcome back" request at the model before you had typed anything, spending tokens on an API you pay for per call. v2.2.6 only *hid* the prompt text, so the reply still arrived — with no visible cause — and the tokens were still spent. The request is gone now, not hidden.
+- **A failed build no longer sends your errors to the AI.** It did this on every failure whether or not you wanted an explanation. There was already an `aiAutoErrors` setting for exactly this and the code never read it. Ask deliberately from the AI panel's Errors tab instead.
+- **The source tree opens expanded.** "Header Files" and "Source Files" were built collapsed and nothing ever opened them, so every project open needed two clicks to reach your own code.
+- **`nexia.json` is hidden from the file tree.** It's the project's own config, written by the IDE through Project Properties. Still on disk — just not in the tree.
+- **Profile builds linked the wrong libraries.** The linker picked libs with a simple `isDebug ? … : …`, but the Xbox 360 SDK ships four flavours, not two — so Profile silently linked the Release libraries instead of the instrumented ones (`xapilibi`, `d3d9i`, `xact3i`, `xmcorei`).
+
+### Added
+- **Release_LTCG builds.** The configuration didn't exist at all: `/GL` when compiling, `/LTCG` when linking, and its own `ltcg` libraries.
+- **Per-configuration settings for imported projects.** All four Visual Studio configurations are read now, so switching to Release or Release_LTCG links *that* configuration's libraries — including the matching build of a referenced library — instead of whichever set Debug happened to import.
+- **Solution Explorer.** An imported project shows the solution it came from, the other projects in it, and whether each dependency actually resolved — so a missing one is visible before the link fails rather than after. External Dependencies lists what's handed to the linker for the current configuration.
+- **Editor colour customisation** — Settings → Appearance → Code Colors. Comments, keywords, strings, numbers, types, functions, variables and preprocessor, with live preview and a reset.
+
+## v2.2.6
+
+### Fixed
+- **Updating no longer deletes your extracted Xbox 360 SDK.** Installing an update cleared the program folder first, and the SDK lives inside it — so several GB vanished and had to be extracted again. Updates leave it alone now; uninstalling still removes it.
+- **Nexia IDE reopens itself after an update** instead of closing and staying closed. Setup only restarts the app when told to, and the IDE wasn't telling it.
+- **The AI tutor no longer shows its own instructions in the chat.** Its prompts to itself — `[SYSTEM: The learner is returning after 3 days away…]` — were rendered as though you had typed them.
+
+## v2.2.5
+
+### Fixed
+- **The AI chat input no longer scrolls away while the model is answering.** The AI panel had no rule of its own, so it inherited `.panel-body` — `flex: 1; overflow-y: auto`, which is written for the file tree. That made the *whole* panel scroll: mode tabs, status bar, transcript and the input box together. The input drifted off the bottom as output streamed and you had to scroll to keep up with it. The panel is now a fixed-height flex column, so the transcript is the only scrolling region and the input stays pinned to the bottom.
+- **AI chat auto-scroll now works.** It was never actually broken: the code sets `scrollTop` on `#ai-messages` in five places while streaming, but that element had no overflow — the scrollbar was on the panel — so every one of those calls silently did nothing. With the transcript as the real scroll container, the view follows the output on its own.
+
+### Changed
+- **The installer is built with NSIS now** rather than by hand. It is **79.5 MB instead of 150.4 MB**: NSIS compresses with LZMA solid, while the old installer used LZNT1 — Windows' NTFS compression, which works in independent 4 KB blocks and so cannot find repetition beyond them.
+
 ## v2.2.4
 
 Nexia IDE now installs per-user and updates itself without a UAC prompt, the way Chrome, Discord and VS Code (User Setup) do.

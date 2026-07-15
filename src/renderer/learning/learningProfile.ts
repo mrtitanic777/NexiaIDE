@@ -799,7 +799,15 @@ export class LearningProfile {
             if (lastTime > 0) {
                 const hoursSince = (Date.now() - lastTime) / (1000 * 60 * 60);
                 if (hoursSince > 24) {
-                    timeSinceNote = `It has been ${Math.round(hoursSince / 24)} days since their last session. Welcome them back and offer to review.`;
+                    // States the fact; does not instruct a greeting.
+                    //
+                    // This used to end with "Welcome them back and offer to
+                    // review." — an instruction in the system prompt, which is
+                    // sent with EVERY message. So the first real question after a
+                    // break got a welcome-back preamble in front of the answer,
+                    // every time, on tokens the user pays for. The tutor can have
+                    // the fact without being told to perform with it.
+                    timeSinceNote = `Their last session was ${Math.round(hoursSince / 24)} days ago.`;
                 }
             }
         }

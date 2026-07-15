@@ -166,7 +166,49 @@ interface UserSettings {
     colorMode: string;
     /** Structural skin: 'default' | 'blade' | 'devkit' | 'phosphor' */
     skin: string;
+    /** Editor syntax colours, keyed by Monaco token type. Hex, with the '#'. */
+    syntaxColors: SyntaxColors;
 }
+
+/**
+ * Syntax highlighting colours, one per Monaco token type.
+ *
+ * Keys are Monaco token names, so they feed straight into defineTheme's rules.
+ * Defaults are the VS Code dark palette these started as.
+ */
+interface SyntaxColors {
+    comment: string;
+    keyword: string;
+    string: string;
+    number: string;
+    type: string;
+    function: string;
+    variable: string;
+    preprocessor: string;
+}
+
+const DEFAULT_SYNTAX_COLORS: SyntaxColors = {
+    comment: '#6a9955',
+    keyword: '#569cd6',
+    string: '#ce9178',
+    number: '#b5cea8',
+    type: '#4ec9b0',
+    function: '#dcdcaa',
+    variable: '#9cdcfe',
+    preprocessor: '#c586c0',
+};
+
+/** Human labels for the settings UI, in the order they're shown. */
+const SYNTAX_COLOR_LABELS: [keyof SyntaxColors, string, string][] = [
+    ['comment',      'Comments',      '// like this'],
+    ['keyword',      'Keywords',      'if, for, class, return'],
+    ['string',       'Strings',       '"text in quotes"'],
+    ['number',       'Numbers',       '42, 3.14, 0xFF'],
+    ['type',         'Types',         'int, float, MyClass'],
+    ['function',     'Functions',     'DoSomething()'],
+    ['variable',     'Variables',     'myVariable'],
+    ['preprocessor', 'Preprocessor',  '#include, #define'],
+];
 const DEFAULT_SETTINGS: UserSettings = {
     fontSize: 14,
     accentColor: '#4ec9b0',
@@ -186,20 +228,68 @@ const DEFAULT_SETTINGS: UserSettings = {
     aiEndpoint: '',
     aiModel: 'auto',
     aiSystemPrompt: '',
-    aiAutoErrors: true,
+    // Off by default: a failed build should not spend the user's tokens unasked.
+    aiAutoErrors: false,
     aiInlineSuggest: false,
     aiFileContext: true,
     colorMode: 'dark',
     skin: 'default',
+    syntaxColors: { ...DEFAULT_SYNTAX_COLORS },
 };
-let userSettings: UserSettings = { ...DEFAULT_SETTINGS };
+let userSettings: UserSettings = { ...DEFAULT_SETTINGS, syntaxColors: { ...DEFAULT_SYNTAX_COLORS } };
+
+/**
+ * Define (or redefine) the editor theme from the current settings.
+ *
+ * Single source of truth. The rules used to be hardcoded in two places, so any
+ * change had to be made twice or the two copies would drift — and a
+ * user-configurable palette would have taken effect in only one of them.
+ *
+ * Monaco wants token colours WITHOUT the leading '#', while everything the user
+ * picks has one, so it's stripped here rather than at each call site.
+ */
+function defineEditorTheme() {
+    // Monaco is loaded at runtime onto window, so it isn't a module-scope symbol.
+    // This can also be called from Settings before the editor exists (or if Monaco
+    // failed to load), hence the guard rather than a crash.
+    const monaco = (window as any).monaco;
+    if (!monaco?.editor) return;
+
+    const sc = { ...DEFAULT_SYNTAX_COLORS, ...(userSettings.syntaxColors || {}) };
+    const hex = (c: string) => (c || '').replace(/^#/, '');
+    monaco.editor.defineTheme('nexia-dark', {
+        base: 'vs-dark', inherit: true,
+        rules: (Object.keys(DEFAULT_SYNTAX_COLORS) as (keyof SyntaxColors)[])
+            .map(token => ({ token, foreground: hex(sc[token]) })),
+        colors: {
+            'editor.background': userSettings.editorBg,
+            'editor.foreground': userSettings.textColor,
+            'editorLineNumber.foreground': userSettings.textDim,
+            'editorLineNumber.activeForeground': userSettings.accentColor,
+            'editor.selectionBackground': '#264f78',
+            'editor.lineHighlightBackground': shiftColor(userSettings.editorBg, 10),
+            'editorCursor.foreground': userSettings.accentColor,
+            'editorSuggestWidget.background': userSettings.bgPanel,
+            'editorSuggestWidget.border': '#3c3c3c',
+        },
+    });
+}
 const SETTINGS_FILE = nodePath.join(nodeOs.homedir(), '.nexia-ide-prefs.json');
 
 function loadUserSettings() {
     try {
         if (nodeFs.existsSync(SETTINGS_FILE)) {
             const data = JSON.parse(nodeFs.readFileSync(SETTINGS_FILE, 'utf-8'));
-            userSettings = { ...DEFAULT_SETTINGS, ...data };
+            // syntaxColors is merged key-by-key, not by the outer spread: a saved
+            // file holding only some of the tokens would otherwise replace the
+            // whole object and lose the rest. The fresh object also matters —
+            // spreading DEFAULT_SETTINGS would alias its syntaxColors, so editing
+            // a colour would mutate the defaults themselves.
+            userSettings = {
+                ...DEFAULT_SETTINGS,
+                ...data,
+                syntaxColors: { ...DEFAULT_SYNTAX_COLORS, ...(data.syntaxColors || {}) },
+            };
             // Migrate old default colors to new darker palette
             const OLD_DEFAULTS: Record<string, string> = {
                 bgDark: '#0d0d1a', bgMain: '#1a1a2e', bgPanel: '#16213e',
@@ -277,11 +367,22 @@ async function pullCloudSettings() {
             'editorBg', 'textColor', 'textDim', 'fancyEffects', 'layout', 'cornerRadius',
             'compactMode', 'colorMode', 'aiProvider', 'aiApiKey', 'aiEndpoint', 'aiModel',
             'aiSystemPrompt', 'aiAutoErrors', 'aiInlineSuggest', 'aiFileContext',
+            'skin', 'syntaxColors',
         ];
         for (const key of prefKeys) {
-            if (cloud[key] !== undefined) {
-                (userSettings as any)[key] = cloud[key];
+            if (cloud[key] === undefined) continue;
+            if (key === 'syntaxColors') {
+                // Merged, not assigned: a cloud copy written by an older client
+                // may hold only some tokens, and a straight assignment would drop
+                // the rest to undefined and render those tokens uncoloured.
+                userSettings.syntaxColors = {
+                    ...DEFAULT_SYNTAX_COLORS,
+                    ...(userSettings.syntaxColors || {}),
+                    ...cloud[key],
+                };
+                continue;
             }
+            (userSettings as any)[key] = cloud[key];
         }
         // Save merged settings locally
         try { nodeFs.writeFileSync(SETTINGS_FILE, JSON.stringify(userSettings, null, 2)); } catch {}
@@ -431,7 +532,17 @@ async function importFromVisualStudio() {
                         ${p.libraries.length ? `<div>Libraries: <span style="color:var(--text-dim)">${escapeHtml(p.libraries.join(', '))}</span></div>` : ''}
                         ${p.defines.length ? `<div>Defines: <span style="color:var(--text-dim)">${escapeHtml(p.defines.join(', '))}</span></div>` : ''}
                         ${p.includeDirectories.length ? `<div>Include dirs: <span style="color:var(--text-dim)">${escapeHtml(p.includeDirectories.join(', '))}</span></div>` : ''}
+                        <div>Goes to: <span style="color:var(--text-dim)">${escapeHtml((p.destination || '') + '\\' + selected.name)}</span></div>
                     </div>
+                    ${(p.projectReferences || []).length ? `
+                        <div style="font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin:14px 0 6px">Depends on</div>
+                        <div style="background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-md);padding:10px 12px;font-size:11.5px;line-height:1.7">
+                            ${p.projectReferences.map((r: any) => {
+                                if (!r.isStaticLibrary) return `<div style="color:var(--text-dim)">${escapeHtml(r.name)} — not a library, nothing to link</div>`;
+                                if (!r.resolved) return `<div style="color:var(--yellow)">⚠ ${escapeHtml(r.name)} — built library not found. Build it in Visual Studio first, or the link will fail.</div>`;
+                                return `<div style="color:var(--text)">✓ ${escapeHtml(r.name)} <span style="color:var(--text-dim)">— ${r.insideSdk ? 'linked from your SDK, not copied' : 'linked from its build output'}</span></div>`;
+                            }).join('')}
+                        </div>` : ''}
                     ${p.warnings.length ? `
                         <div style="font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--yellow);margin:14px 0 6px">Not imported (${p.warnings.length})</div>
                         <div style="background:rgba(204,167,0,0.07);border:1px solid rgba(204,167,0,0.25);border-radius:var(--radius-md);padding:10px 12px;max-height:120px;overflow-y:auto">
@@ -439,13 +550,13 @@ async function importFromVisualStudio() {
                         </div>` : ''}
                     <div style="font-size:11px;color:var(--text-muted);margin-top:12px;line-height:1.6">
                         Your Visual Studio project is <b>copied, never moved</b> — the original keeps working.
-                        Xbox 360 SDK paths aren't copied because Nexia adds them from its own detected SDK.
+                        Anything that lives in the Xbox 360 SDK is linked from there rather than copied in.
                     </div>`}
                 <div id="vs-result" style="display:none;margin-top:14px;font-size:12px"></div>
             </div>
             <div style="display:flex;gap:8px;justify-content:flex-end;padding:14px 20px;border-top:1px solid var(--border)">
                 <button id="vs-cancel" class="welcome-btn">Cancel</button>
-                <button id="vs-go" class="welcome-btn" style="background:var(--green);color:#06120d;border-color:var(--green);font-weight:600" ${p ? '' : 'disabled'}>Choose folder &amp; import</button>
+                <button id="vs-go" class="welcome-btn" style="background:var(--green);color:#06120d;border-color:var(--green);font-weight:600" ${p ? '' : 'disabled'}>Import</button>
             </div>`;
 
         modal.querySelectorAll('.vs-proj').forEach(b => b.addEventListener('click', () => {
@@ -457,12 +568,18 @@ async function importFromVisualStudio() {
             const go = modal.querySelector('#vs-go') as HTMLButtonElement;
             const res = modal.querySelector('#vs-result') as HTMLElement;
             go.disabled = true; go.textContent = 'Importing…';
-            const r = await ipcRenderer.invoke(IPC.VS_IMPORT, { projectPath: selected.path, name: selected.name });
+            const r = await ipcRenderer.invoke(IPC.VS_IMPORT, {
+                projectPath: selected.path,
+                name: selected.name,
+                // Lets the project record the solution it came from, so the
+                // Explorer can show its sibling projects and dependencies.
+                solutionPath: picked.solutionPath || undefined,
+            });
             if (!r.success) {
                 res.style.display = 'block';
                 res.style.color = r.error === 'Cancelled' ? 'var(--text-dim)' : 'var(--red)';
                 res.textContent = r.error === 'Cancelled' ? 'Import cancelled.' : 'Import failed: ' + r.error;
-                go.disabled = false; go.textContent = 'Choose folder & import';
+                go.disabled = false; go.textContent = 'Import';
                 return;
             }
             const rep = r.report;
@@ -749,30 +866,7 @@ function applyThemeColors() {
     // Update Monaco editor theme if loaded
     const monaco = (window as any).monaco;
     if (monaco && editor) {
-        monaco.editor.defineTheme('nexia-dark', {
-            base: 'vs-dark', inherit: true,
-            rules: [
-                { token: 'comment', foreground: '6a9955' },
-                { token: 'keyword', foreground: '569cd6' },
-                { token: 'string', foreground: 'ce9178' },
-                { token: 'number', foreground: 'b5cea8' },
-                { token: 'type', foreground: '4ec9b0' },
-                { token: 'function', foreground: 'dcdcaa' },
-                { token: 'variable', foreground: '9cdcfe' },
-                { token: 'preprocessor', foreground: 'c586c0' },
-            ],
-            colors: {
-                'editor.background': userSettings.editorBg,
-                'editor.foreground': userSettings.textColor,
-                'editorLineNumber.foreground': userSettings.textDim,
-                'editorLineNumber.activeForeground': userSettings.accentColor,
-                'editor.selectionBackground': '#264f78',
-                'editor.lineHighlightBackground': shiftColor(userSettings.editorBg, 10),
-                'editorCursor.foreground': userSettings.accentColor,
-                'editorSuggestWidget.background': userSettings.bgPanel,
-                'editorSuggestWidget.border': '#3c3c3c',
-            },
-        });
+        defineEditorTheme();
         monaco.editor.setTheme('nexia-dark');
     }
 }
@@ -1107,30 +1201,7 @@ function initMonaco() {
 function createEditor() {
     const monaco = (window as any).monaco;
 
-    monaco.editor.defineTheme('nexia-dark', {
-        base: 'vs-dark', inherit: true,
-        rules: [
-            { token: 'comment', foreground: '6a9955' },
-            { token: 'keyword', foreground: '569cd6' },
-            { token: 'string', foreground: 'ce9178' },
-            { token: 'number', foreground: 'b5cea8' },
-            { token: 'type', foreground: '4ec9b0' },
-            { token: 'function', foreground: 'dcdcaa' },
-            { token: 'variable', foreground: '9cdcfe' },
-            { token: 'preprocessor', foreground: 'c586c0' },
-        ],
-        colors: {
-            'editor.background': userSettings.editorBg,
-            'editor.foreground': userSettings.textColor,
-            'editorLineNumber.foreground': userSettings.textDim,
-            'editorLineNumber.activeForeground': userSettings.accentColor,
-            'editor.selectionBackground': '#264f78',
-            'editor.lineHighlightBackground': shiftColor(userSettings.editorBg, 10),
-            'editorCursor.foreground': userSettings.accentColor,
-            'editorSuggestWidget.background': userSettings.bgPanel,
-            'editorSuggestWidget.border': '#3c3c3c',
-        },
-    });
+    defineEditorTheme();
 
     editor = monaco.editor.create($('editor-container'), {
         value: '', language: 'cpp', theme: 'nexia-dark',
@@ -3603,6 +3674,15 @@ function renderSettingsSection(container: HTMLElement, section: string) {
                     ${row('Text Color', colorInput('textColor', s.textColor))}
                     ${row('Text (Dim)', colorInput('textDim', s.textDim))}
                 </div>
+                ${sectionTitle('Code Colors')}
+                <div style="font-size:11px;color:var(--text-muted);margin:0 0 10px;">How your code is syntax-highlighted. Changes apply as you pick.</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;">
+                    ${SYNTAX_COLOR_LABELS.map(([key, label, sample]) => row(
+                        `${label} <span style="color:var(--text-muted);font-family:var(--font-mono);font-size:10.5px;">${escapeHtml(sample)}</span>`,
+                        `<input type="color" data-syntax="${key}" value="${(s.syntaxColors || DEFAULT_SYNTAX_COLORS)[key]}" style="width:36px;height:24px;border:1px solid var(--border);background:var(--bg-input);cursor:pointer;padding:1px;border-radius:var(--radius-sm);">`
+                    )).join('')}
+                </div>
+                <button id="sp-syntax-reset" style="margin-top:8px;padding:5px 10px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-dim);border-radius:var(--radius-sm);cursor:pointer;font-size:11px;">Reset code colors</button>
                 ${sectionTitle('Presets')}
                 <div style="display:flex;gap:6px;flex-wrap:wrap;">
                     <button class="preset-btn" data-preset="xbox" style="padding:6px 12px;border:1px solid var(--border);background:var(--bg-input);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;">🟢 Xbox Green</button>
@@ -3618,8 +3698,10 @@ function renderSettingsSection(container: HTMLElement, section: string) {
                 applyFancyMode();
                 saveUserSettings();
             });
-            // Live color updates
-            container.querySelectorAll('input[type="color"]').forEach(inp => {
+            // Live color updates. Scoped to [data-setting] so the syntax pickers
+            // below — also input[type=color] — don't fall through to here and get
+            // written as top-level settings keys.
+            container.querySelectorAll('input[type="color"][data-setting]').forEach(inp => {
                 inp.addEventListener('input', (e) => {
                     const t = e.target as HTMLInputElement;
                     const key = t.dataset.setting as keyof UserSettings;
@@ -3627,6 +3709,26 @@ function renderSettingsSection(container: HTMLElement, section: string) {
                     applyThemeColors();
                     saveUserSettings();
                 });
+            });
+            // Syntax colors — redefine the editor theme, don't touch the UI palette.
+            container.querySelectorAll('input[type="color"][data-syntax]').forEach(inp => {
+                inp.addEventListener('input', (e) => {
+                    const t = e.target as HTMLInputElement;
+                    const key = t.dataset.syntax as keyof SyntaxColors;
+                    if (!key) return;
+                    if (!userSettings.syntaxColors) userSettings.syntaxColors = { ...DEFAULT_SYNTAX_COLORS };
+                    userSettings.syntaxColors[key] = t.value;
+                    // defineTheme with an existing name replaces it, and Monaco
+                    // re-renders every open editor against the new rules.
+                    defineEditorTheme();
+                    saveUserSettings();
+                });
+            });
+            container.querySelector('#sp-syntax-reset')?.addEventListener('click', () => {
+                userSettings.syntaxColors = { ...DEFAULT_SYNTAX_COLORS };
+                defineEditorTheme();
+                saveUserSettings();
+                renderSettingsSection(container, 'appearance');
             });
             // Skins — apply the structural skin plus its tuned palette
             container.querySelectorAll('.skin-btn').forEach(btn => {
@@ -4947,11 +5049,10 @@ function onBuildComplete(result: any) {
         }
     } else {
         triggerTip('build-fail');
-        // Proactive tutor: explain the build errors
-        const errors = (result.errors || []).map((e: any) => e.message || e.text || String(e));
-        if (errors.length > 0 && (userSettings.aiApiKey || userSettings.aiProvider === 'local')) {
-            tutorOnBuildError(errors);
-        }
+        // A failed build no longer fires the AI automatically. It sent every
+        // error to the model unprompted, which costs tokens on every failed
+        // build whether or not the user wanted an explanation. Use the Errors
+        // tab in the AI panel to ask deliberately.
     }
     renderLearnPanel();
 }
@@ -5400,23 +5501,9 @@ async function init() {
     // Cinematic tutor is loaded on-demand when the user opens it
     learningProfile.startSession();   // Start tracking learning time
 
-    // Proactive tutor: welcome back after long absence
-    if (userSettings.aiApiKey || userSettings.aiProvider === 'local') {
-        const allConcepts = learningProfile.conceptProgress;
-        let lastTime = 0;
-        let lastTopic = 'C++ basics';
-        for (const [id, cp] of allConcepts) {
-            for (const h of cp.history || []) {
-                if (h.timestamp > lastTime) { lastTime = h.timestamp; lastTopic = cp.conceptName || id; }
-            }
-        }
-        if (lastTime > 0) {
-            const hoursSince = (Date.now() - lastTime) / (1000 * 60 * 60);
-            if (hoursSince > 24) {
-                setTimeout(() => tutorOnSessionReturn(lastTopic, Math.round(hoursSince / 24)), 3000);
-            }
-        }
-    }
+    // No "welcome back" prompt on startup. Launching the IDE used to fire a
+    // request at the model unasked, spending tokens before the user had typed
+    // anything — and on an API the user pays for per call.
     applyThemeColors();
     applyFancyMode();
     applyLayout();

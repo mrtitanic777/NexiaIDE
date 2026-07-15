@@ -74,6 +74,8 @@ interface AIMessage {
     content: string;
     timestamp: number;
     id?: number;
+    /** Sent to the model but never drawn in the transcript (proactive tutor prompts). */
+    hidden?: boolean;
 }
 
 let aiMessages: AIMessage[] = [];
@@ -464,7 +466,16 @@ function setAIStatus(state: 'connected' | 'disconnected' | 'loading' | 'error', 
 
 let aiAbortStream: (() => void) | null = null;
 
-export async function sendAIMessage(userText: string, contextCode?: string) {
+/**
+ * @param hidden Send the prompt to the model without showing it in the chat.
+ *               The proactive tutor uses this: its prompts are instructions
+ *               ("[SYSTEM: The learner just failed a quiz about X...]") and are
+ *               not something the user typed, so displaying them exposed the
+ *               scaffolding and read as if the IDE were talking to itself.
+ *               The message still enters aiMessages, so the model sees it and
+ *               the conversation stays coherent.
+ */
+export async function sendAIMessage(userText: string, contextCode?: string, hidden = false) {
     if (!userText.trim() || aiStreaming) return;
     if (!ctx.userSettings.aiApiKey && ctx.userSettings.aiProvider !== 'local' && ctx.userSettings.aiProvider !== 'custom') {
         addAIMessage('system', '⚠ No API key configured. Click the ⚙ button to set up your AI provider.');
@@ -496,7 +507,7 @@ export async function sendAIMessage(userText: string, contextCode?: string) {
         }
     }
 
-    addAIMessage('user', userText);
+    addAIMessage('user', userText, hidden);
     showAITyping();
     setAIStatus('loading', 'Thinking...');
     aiStreaming = true;
@@ -850,10 +861,18 @@ function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function addAIMessage(role: 'user' | 'assistant' | 'system', content: string) {
-    const msg: AIMessage = { role, content, timestamp: Date.now(), id: nextAIMsgId() };
+/**
+ * Add a message to the conversation.
+ *
+ * `hidden` records the message in history — so the model still sees it — without
+ * drawing it in the transcript. Used for the proactive tutor prompts, which are
+ * instructions to the model ("[SYSTEM: The learner is returning after 3 days
+ * away...]") and were being rendered verbatim as though the user had typed them.
+ */
+function addAIMessage(role: 'user' | 'assistant' | 'system', content: string, hidden = false) {
+    const msg: AIMessage = { role, content, timestamp: Date.now(), id: nextAIMsgId(), hidden };
     aiMessages.push(msg);
-    renderAIMessage(msg);
+    if (!hidden) renderAIMessage(msg);
 }
 
 function addMessageActionButtons(el: HTMLElement, msg: AIMessage) {
@@ -1701,6 +1720,12 @@ function applyHintResult() {
 }
 
 // ── Proactive Tutor Messages ──
+//
+// These prompts are instructions to the model, not something the learner typed,
+// so every one of them is sent hidden. They used to be rendered verbatim in the
+// chat — the learner saw "[SYSTEM: The learner is returning after 3 days away...]"
+// appear as if from their own account, which exposed the scaffolding and made
+// the tutor look like it was talking to itself.
 
 /**
  * Called when a lesson is completed. The AI congratulates and summarizes.
@@ -1709,7 +1734,8 @@ export function tutorOnLessonComplete(lessonTitle: string, concepts: string[]): 
     const conceptList = concepts.length > 0 ? concepts.join(', ') : 'general concepts';
     sendAIMessage(
         `[SYSTEM: The learner just completed the lesson "${lessonTitle}" covering ${conceptList}. ` +
-        `Briefly congratulate them (1-2 sentences), summarize the key takeaway, and suggest what to try next. Keep it encouraging and concise.]`
+        `Briefly congratulate them (1-2 sentences), summarize the key takeaway, and suggest what to try next. Keep it encouraging and concise.]`,
+        undefined, true
     );
 }
 
@@ -1720,7 +1746,8 @@ export function tutorOnQuizFail(topic: string, question: string): void {
     sendAIMessage(
         `[SYSTEM: The learner just got a quiz question wrong about "${topic}". The question was: "${question}". ` +
         `Give a brief, friendly explanation of the concept (2-3 sentences). Don't make them feel bad. ` +
-        `Use a [VIZ:...] tag if a visualization would help.]`
+        `Use a [VIZ:...] tag if a visualization would help.]`,
+        undefined, true
     );
 }
 
@@ -1730,7 +1757,8 @@ export function tutorOnQuizFail(topic: string, question: string): void {
 export function tutorOnSessionReturn(lastTopic: string, daysSince: number): void {
     sendAIMessage(
         `[SYSTEM: The learner is returning after ${daysSince} days away. Their last topic was "${lastTopic}". ` +
-        `Welcome them back briefly (1 sentence), remind them where they left off, and offer to do a quick review. Keep it warm and concise.]`
+        `Welcome them back briefly (1 sentence), remind them where they left off, and offer to do a quick review. Keep it warm and concise.]`,
+        undefined, true
     );
 }
 
@@ -1742,7 +1770,8 @@ export function tutorOnBuildError(errors: string[]): void {
     sendAIMessage(
         `[SYSTEM: The learner's build just failed with these errors:\n${errorSummary}\n` +
         `Explain the most likely cause in simple terms (2-3 sentences) and show how to fix it. ` +
-        `Adapt your explanation to their mastery level as shown in the tutor context.]`
+        `Adapt your explanation to their mastery level as shown in the tutor context.]`,
+        undefined, true
     );
 }
 

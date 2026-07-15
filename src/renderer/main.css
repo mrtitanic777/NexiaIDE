@@ -274,6 +274,23 @@ input, textarea, select { user-select: text; -webkit-user-select: text; }
     white-space: nowrap;
 }
 .project-root-node:hover { background: var(--bg-hover); }
+
+/* ── Solution Explorer ──
+   The solution and its sibling projects sit above the open project, the way
+   Visual Studio shows them, so you can see whether a dependency like the ATG
+   framework is actually attached instead of finding out at link time. */
+.solution-node {
+    font-size: 11px; font-weight: 600; color: var(--text-dim);
+    cursor: default; white-space: nowrap;
+}
+.solution-node:hover { background: transparent; }
+.solution-dep {
+    font-size: 11.5px; cursor: default; white-space: nowrap;
+}
+.solution-dep:hover { background: var(--bg-hover); }
+/* External Dependencies entries are libraries, not files — nothing to open. */
+.external-lib { cursor: default; font-size: 11.5px; }
+.external-lib:hover { background: transparent; }
 .project-root-node .tree-arrow { font-size: 8px; width: 16px; text-align: center; color: var(--text-dim); transition: transform 0.1s; }
 .project-root-node .tree-arrow.expanded { transform: rotate(90deg); }
 .project-root-icon { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; }
@@ -1822,6 +1839,29 @@ body:not(.fancy) .toggle-slider, body:not(.fancy) .toggle-slider::before {
    NEXIA AI — SIDEBAR PANEL
    ═══════════════════════════════════════════ */
 
+/* The AI panel is a fixed-height flex column, overriding .panel-body.
+ *
+ * .panel-body is written for the file tree: `flex: 1; overflow-y: auto`, i.e. a
+ * plain scrolling list. Inheriting that made the WHOLE panel scroll — mode tabs,
+ * status bar, messages and the input box together — so the input drifted off the
+ * bottom as the model streamed, and you had to scroll to keep up with it.
+ *
+ * With a flex column and overflow hidden here, `#ai-messages { flex: 1;
+ * overflow-y: auto }` becomes the only scrolling region and
+ * `#ai-input-area { flex-shrink: 0 }` stays pinned to the bottom. Both of those
+ * rules already existed; they just never had a container that let them work.
+ *
+ * min-height: 0 is required: a flex item's default min-height is auto, which
+ * refuses to shrink below its content, so a long transcript would push the
+ * input out of view again even with the column in place.
+ */
+#ai-panel.panel-body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+}
+
 /* Mode tabs */
 #ai-mode-bar {
     display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0;
@@ -1856,12 +1896,16 @@ body:not(.fancy) .toggle-slider, body:not(.fancy) .toggle-slider::before {
 }
 
 /* View switching */
-.ai-view { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+/* min-height: 0 on every flex item in the chain (#ai-panel > .ai-view >
+ * #ai-messages). A flex item defaults to min-height: auto and will not shrink
+ * below its content, so without this a long transcript pushes the input area
+ * off the bottom regardless of the column layout above. */
+.ai-view { display: none; flex: 1; min-height: 0; flex-direction: column; overflow: hidden; }
 .ai-view.active { display: flex; }
 
 /* ── Chat View ── */
 #ai-messages {
-    flex: 1; overflow-y: auto; padding: 8px 0;
+    flex: 1; min-height: 0; overflow-y: auto; padding: 8px 0;
 }
 .ai-welcome {
     text-align: center; padding: 24px 16px;
@@ -2005,7 +2049,7 @@ body:not(.fancy) .toggle-slider, body:not(.fancy) .toggle-slider::before {
 #ai-input-hint { font-size: 10px; color: var(--text-muted); margin-top: 4px; }
 
 /* ── Generate View ── */
-.ai-generate-inner { padding: 12px; overflow-y: auto; flex: 1; }
+.ai-generate-inner { padding: 12px; overflow-y: auto; flex: 1; min-height: 0; }
 .ai-gen-header { text-align: center; margin-bottom: 16px; }
 .ai-gen-icon { font-size: 32px; margin-bottom: 6px; }
 .ai-gen-header h3 { font-size: 15px; font-weight: 600; color: var(--text-bright); margin: 0 0 4px; }
@@ -2070,7 +2114,7 @@ body:not(.fancy) .toggle-slider, body:not(.fancy) .toggle-slider::before {
     padding: 10px 12px; border-bottom: 1px solid var(--border);
     font-size: 12px; color: var(--text);
 }
-#ai-errors-list { overflow-y: auto; flex: 1; }
+#ai-errors-list { overflow-y: auto; flex: 1; min-height: 0; }
 .ai-error-item {
     padding: 10px 12px; border-bottom: 1px solid var(--border-subtle);
     cursor: pointer; transition: background 0.06s;
