@@ -729,6 +729,26 @@ int MyLib_DoWork(const char* input, char* output, int outputSize)
 
         const projectDir = path.join(directory, name);
 
+        // Never write into a directory that already holds something.
+        //
+        // mkdirSync({recursive:true}) succeeds on an existing directory and the
+        // template files are then written straight over whatever is there —
+        // including nexia.json. Creating a project whose name collided with an
+        // existing one silently destroyed it: an imported project lost its
+        // sources, libraries, per-configuration settings and solution info to a
+        // template's nexia.json, while its .cpp files sat on disk unreferenced.
+        //
+        // The VS importer has always refused this; project creation never did.
+        if (fs.existsSync(projectDir)) {
+            const existing = fs.readdirSync(projectDir);
+            if (existing.length > 0) {
+                const isProject = existing.includes(PROJECT_FILE);
+                throw new Error(isProject
+                    ? `A project named "${name}" already exists here. Open it, or pick a different name.`
+                    : `"${name}" already exists and isn't empty. Pick a different name or an empty folder.`);
+            }
+        }
+
         // Create project directory structure
         fs.mkdirSync(projectDir, { recursive: true });
         fs.mkdirSync(path.join(projectDir, 'src'), { recursive: true });
