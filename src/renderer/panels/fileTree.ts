@@ -18,6 +18,8 @@ let _showContextMenu: (x: number, y: number, items: any[]) => void;
 let _getCurrentProject: () => any;
 
 let _closeProject: () => void;
+/** Draws the Explorer when no project is open. Supplied by app.ts. */
+let _renderNoProjectView: (container: HTMLElement) => void = () => {};
 
 /**
  * Local, deliberately.
@@ -49,6 +51,8 @@ export interface FileTreeDeps {
     showContextMenu: (x: number, y: number, items: any[]) => void;
     getCurrentProject: () => any;
     closeProject: () => void;
+    /** Draws the Explorer's contents when no project is open. */
+    renderNoProjectView: (container: HTMLElement) => void;
 }
 
 export function initFileTree(deps: FileTreeDeps) {
@@ -63,6 +67,7 @@ export function initFileTree(deps: FileTreeDeps) {
     _showContextMenu = deps.showContextMenu;
     _getCurrentProject = deps.getCurrentProject;
     _closeProject = deps.closeProject;
+    _renderNoProjectView = deps.renderNoProjectView;
 
     // Wire explorer action buttons
     _$('explorer-new-file')?.addEventListener('click', () => {
@@ -134,8 +139,12 @@ export async function refreshFileTree() {
     const container = _$('file-tree');
     container.innerHTML = '';
 
+    // No project: the Explorer is the recent-projects list. getFileTree returns
+    // [] with nothing open, so this branch used to render an empty panel.
+    // Handing it to app.ts keeps the recents list next to openProject, which is
+    // all it does.
     if (!_getCurrentProject()) {
-        renderFileTree(tree, container, 0);
+        _renderNoProjectView(container);
         return;
     }
 

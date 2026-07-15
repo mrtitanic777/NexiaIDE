@@ -2125,8 +2125,10 @@ function closeCurrentProject() {
     const projectName = currentProject.name;
     currentProject = null as any;
     $('titlebar-project').textContent = '';
-    // Clear the file tree
-    $('file-tree').innerHTML = '';
+    // Redraw the Explorer rather than blanking it: with no project it is the
+    // recent projects list, and emptying the element left the panel dead until
+    // the next restart.
+    refreshFileTree();
     // Show welcome screen
     $('welcome-screen').style.display = '';
     appendOutput(`Closed project: ${projectName}\n`);
@@ -5875,19 +5877,94 @@ document.addEventListener('keydown', (e) => {
 // ══════════════════════════════════════
 //  RECENT PROJECTS
 // ══════════════════════════════════════
+/**
+ * The recent projects list, as last read from the main process.
+ *
+ * Held here because the Explorer is redrawn by refreshFileTree(), which has no
+ * idea what a recent project is — it asks for this view instead.
+ */
+let recentProjects: string[] = [];
+
 function renderRecentProjects(recent: string[]) {
-    const c = $('recent-projects');
-    if (!recent.length) { c.innerHTML = ''; return; }
-    c.innerHTML = '<h3>Recent Projects</h3>';
-    for (const p of recent.slice(0, 3)) {
+    recentProjects = recent;
+    // These render in the Explorer, so redraw it — but only while it is showing
+    // them. With a project open the Explorer is the file tree and must not be
+    // rebuilt out from under the user just because the recents list changed.
+    if (!currentProject) refreshFileTree();
+}
+
+/**
+ * The Explorer, when no project is open: recent projects.
+ *
+ * Visual Studio does the same thing from the other side — recents on the Start
+ * Page, Solution Explorer empty, and the moment you open something the tree
+ * takes over. Nexia's Explorer was simply blank until then, which wasted the one
+ * panel already pointed at "which project am I working on", while the recents
+ * sat in the middle of the screen where the logo is.
+ *
+ * refreshFileTree() calls this. Opening a project makes it call the tree
+ * instead, so this disappears on its own with nothing to tear down.
+ */
+function renderExplorerNoProject(container: HTMLElement) {
+    drawExplorerRecents(container);
+
+    // Then reconcile with the main process. It appends to the list itself when a
+    // project is opened, so our copy is stale the moment you open anything —
+    // close that project and the list would be missing the one you just had.
+    // Drawing from cache first keeps the panel instant; this only redraws if the
+    // list actually differs.
+    ipcRenderer.invoke(IPC.APP_GET_RECENT).then((list: string[]) => {
+        if (currentProject) return;  // a project opened while we were asking
+        const fresh = list || [];
+        if (JSON.stringify(fresh) === JSON.stringify(recentProjects)) return;
+        recentProjects = fresh;
+        drawExplorerRecents(container);
+    }).catch(() => { /* keep what's on screen */ });
+}
+
+function drawExplorerRecents(container: HTMLElement) {
+    container.innerHTML = '';
+
+    if (!recentProjects.length) {
+        const empty = document.createElement('div');
+        empty.className = 'explorer-empty';
+        empty.innerHTML = `
+            <div class="explorer-empty-icon">📂</div>
+            <div>No project open.</div>
+            <div class="explorer-empty-dim">Create or open one to get started.</div>`;
+        container.appendChild(empty);
+        return;
+    }
+
+    const section = document.createElement('div');
+    section.className = 'explorer-recents';
+    section.innerHTML = '<div class="explorer-recents-title">RECENT PROJECTS</div>';
+
+    // Five, not the welcome screen's three: this panel is a full column tall and
+    // has the room the centred layout did not.
+    for (const p of recentProjects.slice(0, 5)) {
         const item = document.createElement('div');
         item.className = 'recent-item';
+
         const name = nodePath.basename(p);
         const dir = nodePath.dirname(p);
+        const gone = !nodeFs.existsSync(p);
+
         const info = document.createElement('div');
         info.className = 'recent-info';
-        info.innerHTML = `<span class="recent-name">📁 ${name}</span><span class="recent-path">${dir}</span>`;
-        info.addEventListener('click', () => openProject(p));
+        // Checked against disk as it's drawn: a deleted or moved project should
+        // say so here rather than fail when clicked.
+        info.innerHTML =
+            `<span class="recent-name${gone ? ' recent-gone' : ''}">📁 ${escapeHtml(name)}</span>` +
+            `<span class="recent-path" title="${escapeHtml(p)}">${gone ? 'Missing — ' : ''}${escapeHtml(dir)}</span>`;
+        info.addEventListener('click', () => {
+            if (gone) {
+                appendOutput(`That project is no longer at ${p}\n`);
+                return;
+            }
+            openProject(p);
+        });
+
         const btn = document.createElement('button');
         btn.className = 'recent-delete';
         btn.title = 'Remove from recent projects';
@@ -5897,10 +5974,13 @@ function renderRecentProjects(recent: string[]) {
             const updated = await ipcRenderer.invoke(IPC.APP_REMOVE_RECENT, p);
             renderRecentProjects(updated);
         });
+
         item.appendChild(info);
         item.appendChild(btn);
-        c.appendChild(item);
+        section.appendChild(item);
     }
+
+    container.appendChild(section);
 }
 
 // ══════════════════════════════════════
@@ -6086,7 +6166,7 @@ async function init() {
     try { applyUILayout(loadUILayoutConfig()); } catch {}
     initMonaco();
     _projectPropsMod.initProjectProperties({ $, $$: (s: string) => document.querySelectorAll(s), appendOutput, ipcRenderer, IPC, getCurrentProject: () => currentProject, setCurrentProject: (p: any) => { currentProject = p; } });
-    _fileTreeMod.initFileTree({ $, appendOutput, ipcRenderer, IPC, shell, nodePath, nodeFs, openFile, showContextMenu, getCurrentProject: () => currentProject, closeProject: closeCurrentProject });
+    _fileTreeMod.initFileTree({ $, appendOutput, ipcRenderer, IPC, shell, nodePath, nodeFs, openFile, showContextMenu, getCurrentProject: () => currentProject, closeProject: closeCurrentProject, renderNoProjectView: renderExplorerNoProject });
     _devkitPanel.initDevkit({ $, appendOutput, escapeHtml: escapeHtml, ipcRenderer, IPC, nodeFs, nodePath, nodeOs });
     initDevkitPanel();
     _emulatorPanel.initEmulator({ $, appendOutput, escapeHtml: escapeHtml, ipcRenderer, IPC, nodeOs });
