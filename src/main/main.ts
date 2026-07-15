@@ -3,7 +3,7 @@
  * Electron main process handling window creation, IPC, and backend services.
  */
 
-import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, Menu, MenuItem } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { Toolchain } from './toolchain';
@@ -832,6 +832,45 @@ function registerIpcHandlers() {
     // ══════════════════════════════════════
 
     ipcMain.handle('app:version', () => app.getVersion());
+
+    /**
+     * The standard right-click menu: Cut, Copy, Paste, Select All, Undo, Redo.
+     *
+     * There was none — right-clicking a text box anywhere in the IDE did
+     * nothing at all. Electron shows no context menu unless one is built.
+     *
+     * Built with Electron roles rather than IPC of our own, so the items are the
+     * real OS menu: they get the platform's labels, accelerators, and the
+     * clipboard behaviour people expect, and they work on inputs Chromium owns
+     * without us touching the DOM.
+     *
+     * The RENDERER decides whether to ask for this (see the contextmenu listener
+     * in app.ts). Doing it from webContents' own 'context-menu' event would fire
+     * inside the Monaco editor too — Monaco uses a hidden textarea, so it counts
+     * as editable — and the user would get this menu stacked on top of Monaco's
+     * own, which has Go to Definition and the rest.
+     */
+    ipcMain.handle('ui:contextMenu', (e, opts: { editable?: boolean; hasSelection?: boolean }) => {
+        const win = BrowserWindow.fromWebContents(e.sender);
+        if (!win) return;
+
+        const menu = new Menu();
+        if (opts?.editable) {
+            menu.append(new MenuItem({ role: 'undo' }));
+            menu.append(new MenuItem({ role: 'redo' }));
+            menu.append(new MenuItem({ type: 'separator' }));
+            menu.append(new MenuItem({ role: 'cut' }));
+            menu.append(new MenuItem({ role: 'copy' }));
+            menu.append(new MenuItem({ role: 'paste' }));
+            menu.append(new MenuItem({ type: 'separator' }));
+            menu.append(new MenuItem({ role: 'selectAll' }));
+        } else if (opts?.hasSelection) {
+            // Read-only text: copying is the only thing that makes sense.
+            menu.append(new MenuItem({ role: 'copy' }));
+            menu.append(new MenuItem({ role: 'selectAll' }));
+        }
+        if (menu.items.length) menu.popup({ window: win });
+    });
 
     /**
      * Download a release installer to temp, reporting progress and verifying

@@ -152,7 +152,6 @@ interface UserSettings {
     fancyEffects: boolean;
     layout: string;
     cornerRadius: string;
-    compactMode: boolean;
     // AI settings
     aiProvider: 'anthropic' | 'openai' | 'local' | 'custom';
     aiApiKey: string;
@@ -285,7 +284,6 @@ const DEFAULT_SETTINGS: UserSettings = {
     fancyEffects: true,
     layout: 'sidebar-left',
     cornerRadius: 'rounded',
-    compactMode: false,
     aiProvider: 'anthropic',
     aiApiKey: '',
     aiEndpoint: '',
@@ -428,7 +426,7 @@ async function pullCloudSettings() {
         const prefKeys = [
             'fontSize', 'accentColor', 'bgDark', 'bgMain', 'bgPanel', 'bgSidebar',
             'editorBg', 'textColor', 'textDim', 'fancyEffects', 'layout', 'cornerRadius',
-            'compactMode', 'colorMode', 'aiProvider', 'aiApiKey', 'aiEndpoint', 'aiModel',
+            'colorMode', 'aiProvider', 'aiApiKey', 'aiEndpoint', 'aiModel',
             'aiSystemPrompt', 'aiAutoErrors', 'aiInlineSuggest', 'aiFileContext',
             'skin', 'syntaxColors',
         ];
@@ -994,11 +992,52 @@ function applyCornerRadius() {
     if (sel) sel.value = radius;
 }
 
-function applyCompactMode() {
-    const compact = userSettings.compactMode || false;
-    document.body.classList.toggle('compact-mode', compact);
-    const cb = document.getElementById('setting-compact-mode') as HTMLInputElement;
-    if (cb) cb.checked = compact;
+/**
+ * Right-click → Cut, Copy, Paste on text anywhere in the IDE.
+ *
+ * There was no context menu at all: right-clicking a text box did nothing.
+ *
+ * The decision has to live here rather than on webContents' 'context-menu'
+ * event, because that fires inside the Monaco editor too — Monaco types through
+ * a hidden textarea, so it looks editable — and the OS menu would appear
+ * stacked on top of Monaco's own, which carries Go to Definition and friends.
+ *
+ * Anything with its own contextmenu handler (the file tree, tab bar) calls
+ * preventDefault, and this checks defaultPrevented so those keep their menus.
+ */
+function installContextMenu() {
+    window.addEventListener('contextmenu', (e: MouseEvent) => {
+        // Someone else already claimed this right-click.
+        if (e.defaultPrevented) return;
+
+        const t = e.target as HTMLElement | null;
+        if (!t) return;
+
+        // Monaco brings its own, with editor commands ours can't offer.
+        if (t.closest('.monaco-editor')) return;
+
+        const editable = !!t.closest('input, textarea, [contenteditable="true"]');
+        const hasSelection = !!window.getSelection()?.toString().trim();
+        if (!editable && !hasSelection) return;
+
+        e.preventDefault();
+        ipcRenderer.invoke('ui:contextMenu', { editable, hasSelection });
+    });
+}
+
+/**
+ * Clear compact mode from anyone who had it on.
+ *
+ * The setting is gone, but a saved prefs file can still carry compactMode:true —
+ * and without removing the class those users would be stuck with a shrunken UI
+ * and no control left to turn it off.
+ */
+function clearCompactMode() {
+    document.body.classList.remove('compact-mode');
+    if ((userSettings as any).compactMode) {
+        delete (userSettings as any).compactMode;
+        saveUserSettings();
+    }
 }
 
 function shiftColor(hex: string, amount: number): string {
@@ -3562,8 +3601,7 @@ function showSettingsPanel() {
         </style>
         <div style="padding:0 16px 16px;font-size:14px;font-weight:600;color:var(--text);">⚙ Settings</div>
         <div class="sp-nav" id="sp-nav">
-            <button class="sp-nav-item active" data-section="editor">📝 Editor</button>
-            <button class="sp-nav-item" data-section="appearance">🎨 Appearance</button>
+            <button class="sp-nav-item active" data-section="appearance">🎨 Appearance</button>
             <button class="sp-nav-item" data-section="layout">📐 Layout</button>
             <button class="sp-nav-item" data-section="ai">🤖 AI Assistant</button>
             <button class="sp-nav-item" data-section="accounts">🔗 Accounts</button>
@@ -3638,7 +3676,9 @@ function showSettingsPanel() {
     document.addEventListener('keydown', escHandler);
 
     // Render default section
-    renderSettingsSection(content, 'editor');
+    // Appearance is the first tab now that Editor is gone — opening on a section
+    // that no longer exists would render an empty panel.
+    renderSettingsSection(content, 'appearance');
 }
 
 function closeSettingsPanel() {
@@ -3731,20 +3771,9 @@ function renderSettingsSection(container: HTMLElement, section: string) {
     const sectionTitle = (title: string) => `<div style="font-size:11px;color:var(--text-dim);letter-spacing:0.04em;margin:16px 0 8px;text-transform:uppercase;font-weight:700;">${title}</div>`;
 
     switch (section) {
-        case 'editor':
-            container.innerHTML = `
-                <h2 style="font-size:18px;font-weight:600;color:var(--text);margin:0 0 20px;">Editor</h2>
-                ${sectionTitle('Font')}
-                ${row('Font Size', `<input type="number" id="sp-fontsize" data-setting="fontSize" min="8" max="40" value="${s.fontSize}" style="width:60px;padding:3px 6px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:13px;text-align:center;border-radius:var(--radius-sm);">`)}
-            `;
-            container.querySelector('#sp-fontsize')!.addEventListener('input', (e) => {
-                const v = parseInt((e.target as HTMLInputElement).value) || 14;
-                userSettings.fontSize = Math.max(8, Math.min(40, v));
-                if (editor) editor.updateOptions({ fontSize: userSettings.fontSize });
-                $('status-zoom').textContent = `${Math.round((userSettings.fontSize / 14) * 100)}%`;
-                saveUserSettings();
-            });
-            break;
+        // 'editor' is gone: it was one field, Font Size, under its own tab and
+        // its own heading. It lives in Appearance now, next to the code colours
+        // it sits beside in the editor anyway.
 
         case 'appearance':
             container.innerHTML = `
@@ -3792,6 +3821,8 @@ function renderSettingsSection(container: HTMLElement, section: string) {
                     )).join('')}
                 </div>
                 <button id="sp-syntax-reset" style="margin-top:8px;padding:5px 10px;border:1px solid var(--border);background:var(--bg-input);color:var(--text-dim);border-radius:var(--radius-sm);cursor:pointer;font-size:11px;">Reset code colors</button>
+                ${sectionTitle('Editor Font')}
+                ${row('Font Size', `<input type="number" id="sp-fontsize" min="8" max="40" value="${s.fontSize}" style="width:60px;padding:3px 6px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:13px;text-align:center;border-radius:var(--radius-sm);">`)}
                 ${sectionTitle('Presets')}
                 <div style="display:flex;gap:6px;flex-wrap:wrap;">
                     <button class="preset-btn" data-preset="xbox" style="padding:6px 12px;border:1px solid var(--border);background:var(--bg-input);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;">🟢 Xbox Green</button>
@@ -3838,6 +3869,17 @@ function renderSettingsSection(container: HTMLElement, section: string) {
                 defineEditorTheme();
                 saveUserSettings();
                 renderSettingsSection(container, 'appearance');
+            });
+            // Font size, moved here from the Editor tab. Deliberately has no
+            // data-setting attribute: the live colour handler above binds to
+            // [data-setting] and would write this number as a colour.
+            container.querySelector('#sp-fontsize')?.addEventListener('input', (e) => {
+                const v = parseInt((e.target as HTMLInputElement).value) || 14;
+                userSettings.fontSize = Math.max(8, Math.min(40, v));
+                if (editor) editor.updateOptions({ fontSize: userSettings.fontSize });
+                const zoom = $('status-zoom');
+                if (zoom) zoom.textContent = `${Math.round((userSettings.fontSize / 14) * 100)}%`;
+                saveUserSettings();
             });
             // Syntax schemes. Copied, not referenced — assigning the preset
             // object itself would alias it, so editing one colour afterwards
@@ -3895,14 +3937,16 @@ function renderSettingsSection(container: HTMLElement, section: string) {
                         <div class="layout-preview"><div class="lp-main"></div><div class="lp-sidebar lp-right"></div></div>
                         <span>Sidebar Right</span>
                     </div>
-                    <div class="layout-option ${currentLayout === 'bottom-panel' ? 'active' : ''}" data-layout="bottom-panel">
-                        <div class="layout-preview"><div class="lp-main"></div><div class="lp-bottom"></div></div>
-                        <span>Bottom Panel</span>
-                    </div>
-                    <div class="layout-option ${currentLayout === 'ai-right' ? 'active' : ''}" data-layout="ai-right">
-                        <div class="layout-preview"><div class="lp-sidebar lp-left"></div><div class="lp-main"></div><div class="lp-ai-panel"></div></div>
-                        <span>AI Side Panel</span>
-                    </div>
+                    <!--
+                        "Bottom Panel" and "AI Side Panel" were here and did
+                        nothing. bottom-panel had no branch in applyLayout() and
+                        no CSS, so it silently fell through to sidebar-left;
+                        ai-right added a class whose only rule targeted
+                        #ai-panel-container, an element that does not exist in
+                        index.html. Two buttons that changed a saved setting and
+                        nothing else. Better to offer two layouts that work than
+                        four where half are decoration.
+                    -->
                 </div>
                 ${sectionTitle('Borders & Spacing')}
                 ${row('Corner Rounding', `<select id="sp-corner" style="padding:4px 8px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:12px;">
@@ -3911,7 +3955,6 @@ function renderSettingsSection(container: HTMLElement, section: string) {
                     <option value="rounded" ${(!s.cornerRadius || s.cornerRadius === 'rounded') ? 'selected' : ''}>Rounded (8px)</option>
                     <option value="pill" ${s.cornerRadius === 'pill' ? 'selected' : ''}>Pill (12px)</option>
                 </select>`)}
-                ${row('Compact Mode', toggle('sp-compact', s.compactMode || false))}
             `;
             container.querySelectorAll('.layout-option').forEach(opt => {
                 opt.addEventListener('click', () => {
@@ -3925,11 +3968,6 @@ function renderSettingsSection(container: HTMLElement, section: string) {
             container.querySelector('#sp-corner')!.addEventListener('change', (e) => {
                 userSettings.cornerRadius = (e.target as HTMLSelectElement).value;
                 applyCornerRadius();
-                saveUserSettings();
-            });
-            container.querySelector('#sp-compact')!.addEventListener('change', (e) => {
-                userSettings.compactMode = (e.target as HTMLInputElement).checked;
-                applyCompactMode();
                 saveUserSettings();
             });
             break;
@@ -4018,7 +4056,7 @@ function renderSettingsSection(container: HTMLElement, section: string) {
             container.querySelector('#sp-retake-tour')!.addEventListener('click', () => { closeSettingsPanel(); setTimeout(() => startTour(), 300); });
             container.querySelector('#sp-reset-theme')!.addEventListener('click', () => {
                 userSettings = { ...DEFAULT_SETTINGS };
-                saveUserSettings(); applyThemeColors(); applyFancyMode(); applyLayout(); applyCornerRadius(); applyCompactMode();
+                saveUserSettings(); applyThemeColors(); applyFancyMode(); applyLayout(); applyCornerRadius(); clearCompactMode();
                 if (editor) editor.updateOptions({ fontSize: userSettings.fontSize });
                 $('status-zoom').textContent = '100%';
                 renderSettingsSection(container, 'advanced');
@@ -5648,7 +5686,8 @@ async function init() {
     applyFancyMode();
     applyLayout();
     applyCornerRadius();
-    applyCompactMode();
+    clearCompactMode();
+    installContextMenu();
     // Apply saved color mode
     if (userSettings.colorMode) applyColorMode(userSettings.colorMode);
     // Apply saved UI layout (sidebar order, panel sizes, welcome screen)
