@@ -117,6 +117,7 @@ if "!NEED_ELECTRON_BUILD!"=="1" (
     call node --no-deprecation scripts/build-portable.js
     if errorlevel 1 ( echo    [X] electron-builder failed! & goto :error )
     if not exist "dist\win-unpacked\NexiaIDE.exe" ( echo    [X] No output found! & goto :error )
+    call node scripts\check-hash.js --commit package.json
     set "UNPACKED_FILES=0"
     for /r "dist\win-unpacked" %%f in (*) do set /a UNPACKED_FILES+=1
     echo    [OK] Full Electron build: !UNPACKED_FILES! files
@@ -138,28 +139,40 @@ echo  [4/6] Compiling native installer...
 
 if not exist "dist" mkdir "dist"
 
+REM -- Generate the version header from package.json (single source of truth) --
+call node scripts/gen-version.js
+if errorlevel 1 ( echo    [X] Version header generation failed! & goto :error )
+
 REM -- Check installer source --
+REM    version_generated.h MUST be in this hash: a version bump touches neither
+REM    installer.c nor installer.h, so without it the installer stays cached and
+REM    ships the previous version's string.
 set "NEED_INSTALLER_BUILD=0"
 if not exist "dist\setup_base.exe" set "NEED_INSTALLER_BUILD=1"
-for /f %%r in ('node scripts\check-hash.js installer\installer.c installer\installer.h') do set "INS_HASH=%%r"
+for /f %%r in ('node scripts\check-hash.js installer\installer.c installer\installer.h installer\version_generated.h') do set "INS_HASH=%%r"
 if "!INS_HASH!"=="changed" set "NEED_INSTALLER_BUILD=1"
 
 if "!NEED_INSTALLER_BUILD!"=="1" (
     call :compile_installer
     if errorlevel 1 goto :error
+    call node scripts\check-hash.js --commit installer\installer.c installer\installer.h installer\version_generated.h
 ) else (
     for %%A in ("dist\setup_base.exe") do echo    [OK] Installer unchanged (cached^): %%~zA bytes
 )
 
 REM -- Check packer source --
+REM    install_pack.c includes installer.h, which defines NXI_PAYLOAD_VERSION and
+REM    the payload structs. Without installer.h here, changing the payload format
+REM    rebuilds the installer but leaves a cached packer writing the old format.
 set "NEED_PACKER_BUILD=0"
 if not exist "dist\packer.exe" set "NEED_PACKER_BUILD=1"
-for /f %%r in ('node scripts\check-hash.js installer\install_pack.c installer\nxcompress.h') do set "PACK_HASH=%%r"
+for /f %%r in ('node scripts\check-hash.js installer\install_pack.c installer\nxcompress.h installer\installer.h installer\version_generated.h') do set "PACK_HASH=%%r"
 if "!PACK_HASH!"=="changed" set "NEED_PACKER_BUILD=1"
 
 if "!NEED_PACKER_BUILD!"=="1" (
     call :compile_packer
     if errorlevel 1 goto :error
+    call node scripts\check-hash.js --commit installer\install_pack.c installer\nxcompress.h installer\installer.h installer\version_generated.h
 ) else (
     echo    [OK] Packer unchanged (cached^)
 )

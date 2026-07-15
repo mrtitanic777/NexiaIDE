@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.2.3
+
+### Fixed
+- **The installer reported the wrong version.** `NXI_APP_VERSION` was a hand-maintained `#define` in `installer.h` that had drifted to `2.1.0`. It feeds both the version drawn on the wizard and the `DisplayVersion` written to Add/Remove Programs — so the v2.2.2 installer displayed "v2.1.0" and registered 2.1.0 while installing a genuine 2.2.2 payload. The version is now generated from `package.json` by `scripts/gen-version.js`, making `package.json` the single source of truth. Hardcoding it again is a compile error.
+- **A version bump could not rebuild the installer.** The installer's build cache keyed on `installer.c` + `installer.h`. A version change touches neither, so a bumped build reused the cached binary and shipped the previous version's string. The generated version header is now part of the cache key.
+- **A payload format change could not rebuild the packer.** `install_pack.c` includes `installer.h` — where `NXI_PAYLOAD_VERSION` and the payload structs live — but the packer's cache key omitted it. Changing the format would rebuild the installer while leaving a cached packer writing the old one, producing an installer that rejects its own payload. `installer.h` is now part of the packer's cache key.
+- **A failed compile could silently ship a stale binary.** `check-hash.js` recorded the hash at the moment it reported "changed" — before anything was compiled. If the compile then failed, the hash stayed recorded, so the next build reported "same", skipped the compile, and packed the previously-built binary into an installer that looked shippable. Checking no longer writes; the hash is recorded via `--commit` only after the build step succeeds.
+
 ## v2.2.2
 
 ### Fixed

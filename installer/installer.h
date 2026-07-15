@@ -74,7 +74,17 @@
 
 #define NXI_MAX_PATH            1024
 #define NXI_APP_NAME            L"Nexia IDE"
-#define NXI_APP_VERSION         L"2.1.0"
+
+/* NXI_APP_VERSION is generated from package.json by scripts/gen-version.js.
+ * Do not hardcode it: this was a literal until v2.2.2, and it drifted to 2.1.0
+ * while the payload was 2.2.2 — the wizard and Add/Remove Programs both lied. */
+#if defined(__has_include)
+#  if !__has_include("version_generated.h")
+#    error "installer/version_generated.h missing - run: node scripts/gen-version.js"
+#  endif
+#endif
+#include "version_generated.h"
+
 #define NXI_APP_PUBLISHER       L"Nexia Project"
 #define NXI_APP_EXE             L"NexiaIDE.exe"
 #define NXI_UNINSTALLER_EXE     L"uninstall.exe"
