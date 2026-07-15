@@ -90,6 +90,28 @@ Var Updated
   Pop $8
 !macroend
 
+; The installer's own icon and version info.
+;
+; Without these NexiaSetup.exe ships with NSIS's default icon and completely
+; empty file properties — no product name, no version, no company. The old
+; hand-written installer embedded both via installer.rc; they were lost in the
+; port to NSIS. This is the file people download, so it is the first thing
+; anyone sees of the project.
+;
+; MUI_ICON must be defined before the page macros are inserted.
+!define MUI_ICON   "..\resources\icon.ico"
+!define MUI_UNICON "..\resources\icon.ico"
+
+; VIProductVersion demands four numeric parts; ${VERSION} carries three.
+VIProductVersion "${VERSION}.0"
+VIAddVersionKey "ProductName"     "${APPNAME}"
+VIAddVersionKey "FileDescription" "${APPNAME} Setup"
+VIAddVersionKey "CompanyName"     "${COMPANY}"
+VIAddVersionKey "LegalCopyright"  "Copyright ${COMPANY}"
+VIAddVersionKey "FileVersion"     "${VERSION}"
+VIAddVersionKey "ProductVersion"  "${VERSION}"
+VIAddVersionKey "OriginalFilename" "NexiaSetup.exe"
+
 !define MUI_ABORTWARNING
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
