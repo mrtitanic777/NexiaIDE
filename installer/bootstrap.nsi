@@ -149,10 +149,15 @@ VIAddVersionKey "OriginalFilename" "NexiaSetup.exe"
  * volumes, so the copy stays as a fallback rather than an assumption.
  */
 !macro MoveOrCopy SRC DST
+  ; Rename refuses to overwrite, so an existing destination makes it fail every
+  ; time — which is every update, since the destination is the previous install.
+  ; Fresh-folder testing never hit this: the destination only exists when there
+  ; is something to update.
+  RMDir /r "${DST}"
   ClearErrors
   Rename "${SRC}" "${DST}"
   ${If} ${Errors}
-    !insertmacro Log "  move failed, copying instead: ${SRC}"
+    !insertmacro Log "  move failed (different volume?), copying instead: ${SRC}"
     CreateDirectory "${DST}"
     CopyFiles /SILENT "${SRC}\*.*" "${DST}"
   ${EndIf}
@@ -471,6 +476,21 @@ Section "Install"
   ; not guaranteed — if they differ, Rename fails and we fall back to copying.
   !insertmacro Log "Installing Nexia IDE..."
   DetailPrint "Installing Nexia IDE..."
+
+  ; Remove a packed app from an earlier electron-builder install.
+  ;
+  ; Electron loads resources\app.asar in preference to resources\app, so leaving
+  ; the old asar in place means it keeps winning: the update lands, reports
+  ; success, and the machine goes on running the previous version forever while
+  ; every version number claims otherwise. Silent, and invisible without
+  ; comparing what is on disk against what the app reports.
+  ${If} ${FileExists} "$INSTDIR\resources\app.asar"
+    !insertmacro Log "  removing old app.asar (it would shadow the new build)"
+    Delete "$INSTDIR\resources\app.asar"
+    Delete "$INSTDIR\resources\app.asar.unpacked"
+    RMDir /r "$INSTDIR\resources\app.asar.unpacked"
+  ${EndIf}
+
   CreateDirectory "$INSTDIR\resources\app"
 
   !insertmacro MoveOrCopy "$BuildDir\node_modules" "$INSTDIR\resources\app\node_modules"
@@ -479,7 +499,14 @@ Section "Install"
   CopyFiles /SILENT "$BuildDir\package.json"       "$INSTDIR\resources\app\package.json"
 
   ; electron.exe IS the app once resources\app is in place.
+  ; Delete first: Rename will not overwrite, and on an update NexiaIDE.exe is
+  ; already sitting there from the previous install.
+  Delete "$INSTDIR\NexiaIDE.exe"
+  ClearErrors
   Rename "$INSTDIR\electron.exe" "$INSTDIR\NexiaIDE.exe"
+  ${If} ${Errors}
+    !insertmacro Fail "Could not replace NexiaIDE.exe. Close Nexia IDE and try again."
+  ${EndIf}
 
   ; Stamp our icon and version onto it. Straight from electron.exe it carries
   ; Electron's icon and reports "Electron 22.3.27" in its properties, which reads

@@ -3507,17 +3507,50 @@ function showSettingsPanel() {
             <button class="sp-nav-item" data-section="advanced">⚡ Advanced</button>
         </div>
         <div style="flex:1;"></div>
-        <div style="padding:8px 16px;">
-            <button id="sp-done" style="width:100%;padding:8px 0;background:var(--accent);color:#1e1e1e;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);">Done</button>
-        </div>
+        <div id="sp-version" style="padding:8px 16px;font-size:10.5px;color:var(--text-muted);user-select:text;"></div>
     `;
     win.appendChild(sidebar);
 
-    // Content
+    // Build version, bottom-left. Read from the main process rather than the
+    // bundled package.json: app.getVersion() is what the updater compares
+    // against the release manifest, so this shows the number that actually
+    // decides whether an update is offered.
+    ipcRenderer.invoke('app:version').then((v: string) => {
+        const el = $('sp-version');
+        if (el) el.textContent = `Nexia IDE ${v}`;
+    }).catch(() => {
+        const el = $('sp-version');
+        if (el) el.textContent = '';
+    });
+
+    // Content, in a relative wrapper so the close button can pin to the corner.
+    // It cannot live inside #sp-content: that scrolls, and the button would
+    // scroll away with the settings.
+    const contentWrap = document.createElement('div');
+    contentWrap.style.cssText = 'flex:1;position:relative;display:flex;min-width:0;';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.id = 'sp-close';
+    closeBtn.title = 'Close settings (Esc)';
+    closeBtn.textContent = '✕';
+    closeBtn.style.cssText = 'position:absolute;top:12px;right:14px;z-index:2;width:26px;height:26px;display:flex;align-items:center;justify-content:center;border:none;border-radius:5px;background:transparent;color:var(--text-muted);font-size:13px;cursor:pointer;font-family:var(--font);transition:background 0.15s,color 0.15s;';
+    closeBtn.addEventListener('mouseenter', () => {
+        closeBtn.style.background = 'var(--bg-hover)';
+        closeBtn.style.color = 'var(--text)';
+    });
+    closeBtn.addEventListener('mouseleave', () => {
+        closeBtn.style.background = 'transparent';
+        closeBtn.style.color = 'var(--text-muted)';
+    });
+    closeBtn.addEventListener('click', () => closeSettingsPanel());
+    contentWrap.appendChild(closeBtn);
+
     const content = document.createElement('div');
     content.id = 'sp-content';
-    content.style.cssText = 'flex:1;overflow-y:auto;padding:24px 28px;';
-    win.appendChild(content);
+    // Extra right padding so a section heading can't slide under the ✕.
+    content.style.cssText = 'flex:1;overflow-y:auto;padding:24px 28px;padding-right:48px;';
+    contentWrap.appendChild(content);
+    win.appendChild(contentWrap);
 
     overlay.appendChild(win);
     requestAnimationFrame(() => { overlay.style.opacity = '1'; });
@@ -3531,7 +3564,9 @@ function showSettingsPanel() {
         renderSettingsSection(content, btn.dataset.section!);
     });
 
-    sidebar.querySelector('#sp-done')!.addEventListener('click', () => closeSettingsPanel());
+    // Closing is the ✕ in the top right, the overlay, or Escape. The old Done
+    // button sat bottom-left of the sidebar, where nothing else about the panel
+    // suggested a dialog to confirm — settings apply as you change them.
 
     // Escape key
     const escHandler = (e: KeyboardEvent) => {

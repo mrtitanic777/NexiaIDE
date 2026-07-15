@@ -1,112 +1,138 @@
 # Changelog
 
-## v2.2.7
+## v3.0.0
 
-### Fixed
-- **The AI is no longer prompted when you open the IDE.** Startup fired a "welcome back" request at the model before you had typed anything, spending tokens on an API you pay for per call. v2.2.6 only *hid* the prompt text, so the reply still arrived — with no visible cause — and the tokens were still spent. The request is gone now, not hidden.
-- **A failed build no longer sends your errors to the AI.** It did this on every failure whether or not you wanted an explanation. There was already an `aiAutoErrors` setting for exactly this and the code never read it. Ask deliberately from the AI panel's Errors tab instead.
-- **The source tree opens expanded.** "Header Files" and "Source Files" were built collapsed and nothing ever opened them, so every project open needed two clicks to reach your own code.
-- **`nexia.json` is hidden from the file tree.** It's the project's own config, written by the IDE through Project Properties. Still on disk — just not in the tree.
-- **Profile builds linked the wrong libraries.** The linker picked libs with a simple `isDebug ? … : …`, but the Xbox 360 SDK ships four flavours, not two — so Profile silently linked the Release libraries instead of the instrumented ones (`xapilibi`, `d3d9i`, `xact3i`, `xmcorei`).
+Everything below is measured against **v2.1.0**, the last release. The installer is
+**0.72 MB instead of 150.4 MB**, updates install themselves without a permission
+prompt, and Visual Studio projects come across and build.
 
-### Added
-- **Release_LTCG builds.** The configuration didn't exist at all: `/GL` when compiling, `/LTCG` when linking, and its own `ltcg` libraries.
-- **Per-configuration settings for imported projects.** All four Visual Studio configurations are read now, so switching to Release or Release_LTCG links *that* configuration's libraries — including the matching build of a referenced library — instead of whichever set Debug happened to import.
-- **Solution Explorer.** An imported project shows the solution it came from, the other projects in it, and whether each dependency actually resolved — so a missing one is visible before the link fails rather than after. External Dependencies lists what's handed to the linker for the current configuration.
-- **Editor colour customisation** — Settings → Appearance → Code Colors. Comments, keywords, strings, numbers, types, functions, variables and preprocessor, with live preview and a reset.
+### The installer
 
-## v2.2.6
+- **0.72 MB, down from 150.4 MB.** Nexia IDE's own code is about 2.6 MB; the rest of
+  the old installer was Electron — a complete copy of the Chromium browser and
+  Node.js, packed inside the download. The installer now carries the source and
+  fetches Node from nodejs.org, packages from npm and Electron from GitHub while it
+  installs, then builds the IDE on your machine. About a minute, and it needs an
+  internet connection. The finished install is 246 MB, slightly smaller than before.
+- **Installs to `%LOCALAPPDATA%\Programs\NexiaIDE`, not `C:\Program Files`.** Program
+  Files can only be written by an administrator, which is what forced a UAC prompt on
+  every single update. A folder you own needs no permission, so updates simply happen.
+  This is the same reason Chrome, Discord and VS Code install where they do.
+- **Existing Program Files installs are migrated.** The new copy is installed
+  per-user and the old one retired afterwards. That retirement needs administrator,
+  so it costs one prompt, once, on the upgrade that moves the machine — never again.
+  Decline it and the old copy just stays on disk; the new install already works.
+- **Updates install themselves and reopen the IDE.** No clicks, no prompts.
+- **Updating keeps your extracted Xbox 360 SDK.** It lives inside the program folder,
+  which an update used to clear — costing several GB and a re-extract.
 
-### Fixed
-- **Updating no longer deletes your extracted Xbox 360 SDK.** Installing an update cleared the program folder first, and the SDK lives inside it — so several GB vanished and had to be extracted again. Updates leave it alone now; uninstalling still removes it.
-- **Nexia IDE reopens itself after an update** instead of closing and staying closed. Setup only restarts the app when told to, and the IDE wasn't telling it.
-- **The AI tutor no longer shows its own instructions in the chat.** Its prompts to itself — `[SYSTEM: The learner is returning after 3 days away…]` — were rendered as though you had typed them.
+### Visual Studio interoperability
 
-## v2.2.5
+- **Import a solution** — `File → Import from Visual Studio (.sln)`. Reads `.sln`
+  files and both project formats the Xbox 360 XDK shipped against (`.vcxproj` and
+  legacy `.vcproj`), mapping sources, headers, include and library directories,
+  libraries, defines, precompiled header, RTTI, exception handling, warning level,
+  optimization and configuration type. Your project is **copied, never moved**, so it
+  keeps building in Visual Studio. A preview shows exactly what comes over —
+  including anything skipped — before a single file is written.
+- **Referenced projects are linked properly.** Visual Studio links a referenced
+  static library *implicitly*, so the project file never names it — an import would
+  bring across every SDK library except the one thing the project actually depended
+  on, and the build failed at the link step with the headers resolving fine.
+  Referenced projects are now resolved and linked, and anything living inside the
+  Xbox 360 SDK (the ATG framework) is linked from there rather than copied in.
+- **Every configuration keeps its own settings**, so Release and Release LTCG link
+  *their* libraries — including the matching build of a referenced library — instead
+  of whichever set Debug happened to import.
+- **Solution Explorer** shows the solution an imported project came from, the other
+  projects in it, and whether each dependency actually resolved — visible before the
+  link fails rather than after.
+- **Imports go straight to your projects folder.** No folder picker; there was only
+  ever one right answer.
 
-### Fixed
-- **The AI chat input no longer scrolls away while the model is answering.** The AI panel had no rule of its own, so it inherited `.panel-body` — `flex: 1; overflow-y: auto`, which is written for the file tree. That made the *whole* panel scroll: mode tabs, status bar, transcript and the input box together. The input drifted off the bottom as output streamed and you had to scroll to keep up with it. The panel is now a fixed-height flex column, so the transcript is the only scrolling region and the input stays pinned to the bottom.
-- **AI chat auto-scroll now works.** It was never actually broken: the code sets `scrollTop` on `#ai-messages` in five places while streaming, but that element had no overflow — the scrollbar was on the panel — so every one of those calls silently did nothing. With the transcript as the real scroll container, the view follows the output on its own.
+### Building
 
-### Changed
-- **The installer is built with NSIS now** rather than by hand. It is **79.5 MB instead of 150.4 MB**: NSIS compresses with LZMA solid, while the old installer used LZNT1 — Windows' NTFS compression, which works in independent 4 KB blocks and so cannot find repetition beyond them.
-
-## v2.2.4
-
-Nexia IDE now installs per-user and updates itself without a UAC prompt, the way Chrome, Discord and VS Code (User Setup) do.
-
-### Changed
-- **Installs to `%LOCALAPPDATA%\Programs\NexiaIDE` instead of `C:\Program Files\NexiaIDE`.** Program Files is only writable by an administrator, which is what forced every single update through a UAC prompt. A per-user location is writable by the person using it, so updates need no elevation at all. The installer's manifest is now `asInvoker` rather than `requireAdministrator`.
-- **The Add/Remove Programs entry is written to `HKCU`, always.** It previously tried `HKLM` first and fell back to `HKCU` "if no admin rights", so the hive depended on how setup happened to be launched. A per-user install advertised machine-wide would appear for every user on the PC while pointing into one user's private directory.
-- **Existing `C:\Program Files` installs are migrated automatically.** The new install goes to the per-user location and the old copy is retired afterwards. Retiring Program Files needs administrator, so this costs one UAC prompt — once, on the upgrade that migrates the machine. Never again after that. If the prompt is declined, the old copy simply stays on disk; the new install already works.
-
-### Fixed
-- **An update could uninstall the IDE and leave nothing installed.** When setup found an existing install it showed a prompt whose `Yes` meant "uninstall and exit". During an update that reads naturally as "yes, replace the old files" — choosing it removed Nexia IDE and quit. Updates are now silent and never show this prompt at all; the interactive wording has been reversed so `Yes` means *update* and the destructive choice is explicit.
-- **Updates install themselves with no clicks.** Setup accepts `/S`, and the IDE uses it.
-- **A silent update could overwrite files the running IDE still had open.** The wizard never hit this because a human takes seconds to click through, by which time the app has exited; silent mode starts extracting immediately. Setup now waits for the previous copy to release its files before extracting.
-- **`/uninstall` was matched against the whole command line, including the EXE path.** Any user whose path contained `/uninstall` or `-uninstall` would have had setup silently uninstall instead of install. Arguments are tokenised properly now.
-
-## v2.2.3
-
-### Fixed
-- **The installer reported the wrong version.** `NXI_APP_VERSION` was a hand-maintained `#define` in `installer.h` that had drifted to `2.1.0`. It feeds both the version drawn on the wizard and the `DisplayVersion` written to Add/Remove Programs — so the v2.2.2 installer displayed "v2.1.0" and registered 2.1.0 while installing a genuine 2.2.2 payload. The version is now generated from `package.json` by `scripts/gen-version.js`, making `package.json` the single source of truth. Hardcoding it again is a compile error.
-- **A version bump could not rebuild the installer.** The installer's build cache keyed on `installer.c` + `installer.h`. A version change touches neither, so a bumped build reused the cached binary and shipped the previous version's string. The generated version header is now part of the cache key.
-- **A payload format change could not rebuild the packer.** `install_pack.c` includes `installer.h` — where `NXI_PAYLOAD_VERSION` and the payload structs live — but the packer's cache key omitted it. Changing the format would rebuild the installer while leaving a cached packer writing the old one, producing an installer that rejects its own payload. `installer.h` is now part of the packer's cache key.
-- **A failed compile could silently ship a stale binary.** `check-hash.js` recorded the hash at the moment it reported "changed" — before anything was compiled. If the compile then failed, the hash stayed recorded, so the next build reported "same", skipped the compile, and packed the previously-built binary into an installer that looked shippable. Checking no longer writes; the hash is recorded via `--commit` only after the build step succeeds.
-
-## v2.2.2
-
-### Fixed
-- **Updates can now actually install themselves.** The update downloaded and verified correctly, then failed at the last step with `EACCES` and an Electron crash dialog. The installer's manifest requests administrator, and the launch went through `child_process.spawn` → `CreateProcess`, which cannot elevate — Windows rejects it with `ERROR_ELEVATION_REQUIRED`, surfaced as `EACCES`. The installer is now launched via the shell (`ShellExecute`), which raises the UAC prompt properly.
-- **A failed install now reports itself instead of crashing.** `spawn` signals failure through an asynchronous `error` event rather than throwing, so the surrounding `try/catch` never saw it and Node escalated it to an uncaught exception. The launch path is promise-based now, so any failure is shown in the update dialog.
-
-> Because 2.2.0 and 2.2.1 both carry the broken launch step, this build has to be installed by hand once. Updates from 2.2.2 onward install themselves.
-
-## v2.2.1
-
-### Fixed
-- **Discord community works for everyone.** Signed-in users now receive the bot configuration from the Nexia server, so the forum feed and membership check work on every machine — not just one that had been configured by hand. Previously the server returned empty credentials, leaving everyone else with an empty Community panel.
-- **Lesson Builder: blocks added after loading a lesson couldn't be positioned.** A newly added block had no layout entry, so the preview drew no rectangles at all — not even its spotlight — and the coordinate editors never appeared.
-
-### Added
-- **Token-level layout in the Lesson Builder.** Each token explanation can have its spotlight and mini-panel placed by hand via `◎ Place`, and the cinematic engine honours those baked positions at playback. Tokens without a placement keep auto-positioning.
-- **Connection-level layout.** A connection's source and destination spotlights can be placed independently of the block spotlight they'd otherwise inherit.
-
-As with block layout, the authored **x, width and panel height** are used while the **vertical position stays live**, so spotlights keep tracking their code line as it scrolls.
-
-## v2.2.0
-
-### Interoperability
-- **Visual Studio import** — `File → Import from Visual Studio (.sln)`. Reads `.sln` solutions and both project formats the Xbox 360 XDK shipped against (`.vcxproj` MSBuild and legacy `.vcproj`), and maps them onto a Nexia project: sources, headers, include directories, library directories, libraries, preprocessor defines, precompiled header, RTTI, exception handling, warning level, optimization and configuration type. Multi-project solutions let you choose which project to bring over. Source files are **copied, never moved**, so the original VS project keeps building. A preview shows exactly what will be imported — including anything deliberately skipped — before a single file is written.
-
-### Appearance
-- **Structural skins** — three selectable skins that restyle the interface itself rather than recolouring it (`Settings → Appearance`):
-  - **Blade** — the 2005 Xbox 360 dashboard: curved sliding blades, ring-of-light glow, deep green field.
-  - **Devkit** — the IDE as hardware: brushed chassis, machined bezel, keycap rail, status LEDs, recessed screen.
-  - **Phosphor** — CRT terminal brutalism: monospace throughout, hard 1px rules, scanlines and phosphor bloom.
-- Colour presets still apply on top of any skin.
+- **Release LTCG builds** — `/GL` when compiling, `/LTCG` when linking, against the
+  LTCG libraries.
+- **Profile builds link the right libraries.** The Xbox 360 SDK ships four flavours
+  and Nexia only knew about two, so Profile quietly used the Release set instead of
+  the instrumented one.
+- **Debug builds link the debug C runtime.** `_DEBUG` was defined without telling the
+  compiler which runtime to use, so it defaulted to the release CRT — and the
+  debug-only assertion code the standard library emits had nowhere to resolve to.
 
 ### Learning
-- **Curriculum lesson viewer** — the built-in 8-module / 17-lesson curriculum is now playable. Steps through text, code, exercises (with hints and solutions), quizzes and visualizations, and records real progress against the adaptive learning profile.
-- **Progress now actually tracks** — quizzes and lesson completion feed the mastery model (previously `recordInteraction`/`recordLessonProgress` were never called by anything).
-- **Cloud lessons** — browse, download and update published lessons from the Learn panel, with version-aware update badges and a startup notice.
-- **Progress sync** — the learning profile syncs to your Nexia account and merges across devices (monotonic field-wise merge, so two machines can't clobber each other).
+
+- **The curriculum is playable.** The built-in 8-module, 17-lesson course steps
+  through text, code, exercises with hints and solutions, quizzes and visualizations.
+- **Progress actually tracks.** Quizzes and lesson completion now feed the mastery
+  model; previously nothing called into it.
+- **Cloud lessons** — browse, download and update published lessons from the Learn
+  panel, with version-aware update badges.
+- **Progress syncs to your account** and merges across machines, so two computers
+  can't overwrite each other.
+- **Lesson Builder: hand-placed layouts.** A token explanation's spotlight and panel,
+  and a connection's source and destination spotlights, can be positioned by hand;
+  the cinematic engine follows them during playback. Authored **x, width and panel
+  height** are used while the **vertical position stays live**, so spotlights keep
+  tracking their code line as it scrolls.
+
+### The AI assistant
+
+- **It stays quiet until you ask it something.** Three separate things were sending
+  it requests you never made — opening the IDE, a failed build, and an instruction
+  buried in the system prompt telling it to greet you. Each one spent tokens on an
+  API you pay for per call.
+- **The chat box stays put while the model answers.** The whole panel used to scroll
+  — tabs, status, transcript and the input together — so the place you type drifted
+  off the bottom as text arrived.
+- **The conversation follows the answer** on its own.
+
+### Appearance
+
+- **Structural skins** — three skins that restyle the interface rather than
+  recolouring it (`Settings → Appearance`):
+  - **Blade** — the 2005 Xbox 360 dashboard: curved sliding blades, ring-of-light
+    glow, deep green field.
+  - **Devkit** — the IDE as hardware: brushed chassis, machined bezel, keycap rail,
+    status LEDs, recessed screen.
+  - **Phosphor** — CRT terminal brutalism: monospace throughout, hard 1px rules,
+    scanlines and phosphor bloom.
+  - Colour presets still apply on top of any skin.
+- **Choose your own syntax colours** — `Settings → Appearance → Code Colors`.
+  Comments, keywords, strings, numbers, types, functions, variables and preprocessor,
+  with live preview and a reset.
+
+### Accounts and community
+
+- **You stay signed in.** Sessions expired after two hours, and on expiry the client
+  deleted its token — losing your identity along with your session. Sessions now last
+  30 days, and the last account is remembered separately (username and email only, no
+  secrets).
+- **Welcome-back prompt** — signed-out users get a "sign in as *you* / different
+  account / continue without an account" choice with the trade-offs spelled out.
+  Signed-in users are only ever interrupted by a release popup.
+- **Discord works for everyone.** Sign in and the Community feed loads; it previously
+  only worked on a machine configured by hand.
+- **No more "you haven't joined the Nexia server"** when you're already a member. The
+  check read your own Discord guild list, which fails silently if your token predates
+  the required scope, and treated "couldn't check" as "not a member".
 
 ### Software updates
-- **Built-in updater** — the IDE checks a release manifest on the Nexia server and shows a release popup with the version, headline and changelog. Downloads report live progress and are **SHA-256 verified before anything is executed** — a mismatch is rejected.
+
+- **Built-in updater** — the IDE checks a release manifest and shows a popup with the
+  version, headline and changelog. Downloads are **SHA-256 verified before anything
+  is executed**; a mismatch is rejected and non-HTTPS URLs are refused.
 - **Admin → Releases** — publish or pull a release from inside the IDE.
 
-### Fixes
-- **You stay signed in.** Sessions expired after 2 hours (`TOKEN_EXPIRY: '2h'`), and on expiry the client deleted its token file — losing your identity as well as your session. Tokens now last 30 days and the last account is remembered separately (username/email only, no secrets).
-- **Welcome-back prompt** — signed-out users get a "sign in as *you* / different account / continue without an account" choice with the trade-offs spelled out. Signed-in users are only ever interrupted by a release popup.
-- **Discord membership** — the IDE claimed you hadn't joined the Nexia server when you had. The check read the *user's* OAuth guild list (which silently fails without the `guilds` scope or with an expired token) and treated "couldn't check" as "not a member". Membership is now confirmed via the bot, and an undetermined result never nags.
-- **Server Settings** was unreachable from the account menu.
-- **Build from a path containing spaces** — `build-portable.js` invoked `electron-builder` unquoted, breaking any project path with a space in it.
+### Smaller things
 
-### Security
-- Update downloads are SHA-256 verified against the signed manifest before execution.
-- Non-HTTPS download URLs are refused.
-- Hardened login lockout (per-email serialization) and transactional registration.
+- **Your source files are visible when a project opens.** Header Files and Source
+  Files were built collapsed with nothing to open them.
+- **`nexia.json` is hidden from the file tree.** It's the project's own config,
+  written by the IDE. Still on disk.
+- **Server Settings** was unreachable from the account menu.
+- **Building from a path containing spaces** no longer breaks the build.
 
 ## v2.1.0
 
