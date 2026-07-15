@@ -19,6 +19,24 @@ let _getCurrentProject: () => any;
 
 let _closeProject: () => void;
 
+/**
+ * Local, deliberately.
+ *
+ * This file compiles to a CommonJS module with its own scope, so app.ts's
+ * escapeHtml is not visible here — TypeScript resolves it from an ambient
+ * declaration and says nothing, but at runtime it is a free variable and throws
+ * ReferenceError the first time a name needs escaping. Everything else this
+ * module needs from app.ts arrives through FileTreeDeps for the same reason.
+ */
+function escapeHtml(s: string): string {
+    return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 export interface FileTreeDeps {
     $: (id: string) => HTMLElement;
     appendOutput: (text: string) => void;
@@ -151,7 +169,63 @@ export async function refreshFileTree() {
         ]);
     });
 
+    // ── Solution header, when the project came from a .sln ──
+    //
+    // Visual Studio puts the solution and its projects at the top of Solution
+    // Explorer, which is how you see at a glance that your dependencies are
+    // attached. Nexia builds one project, so the sibling projects here are
+    // informational — but a project that links AtgFramework should say so
+    // rather than leaving you to guess whether it came across.
+    const solution = _getCurrentProject().solution;
+    if (solution && solution.projects.length > 1) {
+        const slnNode = document.createElement('div');
+        slnNode.className = 'tree-item solution-node';
+        slnNode.style.paddingLeft = '8px';
+        const count = solution.projects.length;
+        slnNode.innerHTML =
+            `<span class="tree-arrow expanded">▼</span>` +
+            `<span class="tree-icon">📁</span>` +
+            `<span class="tree-name">Solution '${escapeHtml(solution.name)}' (${count} project${count === 1 ? '' : 's'})</span>`;
+        slnNode.title = solution.path || solution.name;
+        container.appendChild(slnNode);
+
+        // Sibling projects — everything in the solution that isn't the one open.
+        for (const p of solution.projects) {
+            if (p.isCurrent) continue;
+            const cfgs = Object.keys(p.libPaths || {});
+            const item = document.createElement('div');
+            item.className = 'tree-item solution-dep';
+            item.style.paddingLeft = '24px';
+            const state = cfgs.length
+                ? `<span style="color:var(--text-muted)"> — ${p.insideSdk ? 'linked from SDK' : 'linked'}</span>`
+                : `<span style="color:var(--yellow)"> — not built, won't link</span>`;
+            item.innerHTML =
+                `<span class="tree-arrow" style="visibility:hidden">▶</span>` +
+                `<span class="tree-icon">${cfgs.length ? '📦' : '⚠'}</span>` +
+                `<span class="tree-name">${escapeHtml(p.name)}${state}</span>`;
+            item.title = cfgs.length
+                ? `${p.path}\nAvailable for: ${cfgs.join(', ')}`
+                : `${p.path}\nNo built library found — this dependency won't link.`;
+            container.appendChild(item);
+        }
+    }
+
     container.appendChild(rootNode);
+
+    // ── External Dependencies — the libraries this project links ──
+    // VS shows these under each project. Ours lists what actually gets passed to
+    // the linker for the current configuration, so a missing dependency is
+    // visible here rather than only at link time.
+    {
+        const proj = _getCurrentProject();
+        const cfg = proj.configuration || 'Debug';
+        const libs = proj.configurations?.[cfg]?.libraries || proj.libraries || [];
+        if (libs.length) {
+            const depNodes = libs.map((l: string) => ({ name: l, isExternalLib: true }));
+            rootChildren.appendChild(createVirtualFolder(
+                `External Dependencies (${cfg})`, '🔗', depNodes, 1, /* collapsed */ true));
+        }
+    }
 
     // ── Build virtual "Header Files" and "Source Files" groups ──
     const HEADER_EXTS = new Set(['.h', '.hpp', '.hxx', '.inl']);
@@ -203,18 +277,29 @@ export async function refreshFileTree() {
     container.appendChild(rootChildren);
 }
 
-function createVirtualFolder(name: string, icon: string, files: any[], depth: number): HTMLElement {
+/**
+ * @param collapsed Start shut. Used for External Dependencies, which is a long
+ *                  list you rarely need open — Visual Studio collapses it too.
+ *                  Header/Source Files default to open, because they are the
+ *                  reason the panel exists.
+ */
+function createVirtualFolder(name: string, icon: string, files: any[], depth: number, collapsed = false): HTMLElement {
     const wrapper = document.createElement('div');
-    const slug = name.toLowerCase().replace(/\s+/g, '-');
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
     wrapper.className = `virtual-folder virtual-folder-${slug}`;
 
     const header = document.createElement('div');
     header.className = 'tree-item';
     header.style.paddingLeft = (8 + depth * 16) + 'px';
-    header.innerHTML = `<span class="tree-arrow">▶</span><span class="tree-icon">${icon}</span><span class="tree-name">${name}</span>`;
+    // Expanded from the start (unless asked otherwise). These were built collapsed
+    // and nothing ever opened them, so opening a project showed "Header Files" and
+    // "Source Files" as two shut folders and you had to click into them every
+    // single time to reach your code. Visual Studio shows them open, and there is
+    // nothing to gain by hiding the only thing in the panel worth looking at.
+    header.innerHTML = `<span class="tree-arrow${collapsed ? '' : ' expanded'}">${collapsed ? '▶' : '▼'}</span><span class="tree-icon">${icon}</span><span class="tree-name">${name}</span>`;
 
     const children = document.createElement('div');
-    children.className = 'tree-children';
+    children.className = collapsed ? 'tree-children' : 'tree-children open';
 
     header.addEventListener('click', () => {
         children.classList.toggle('open');
@@ -238,6 +323,19 @@ function createVirtualFolder(name: string, icon: string, files: any[], depth: nu
 
     // Render files inside
     for (const file of files) {
+        // External Dependencies entries are libraries, not files on disk: they
+        // have a name and nothing to open. Render them plainly and skip the file
+        // behaviours, or clicking one would try to open `undefined`.
+        if (file.isExternalLib) {
+            const li = document.createElement('div');
+            li.className = 'tree-item external-lib';
+            li.style.paddingLeft = (8 + (depth + 1) * 16 + 20) + 'px';
+            li.innerHTML = `<span class="tree-icon">📚</span><span class="tree-name" style="color:var(--text-dim)">${file.name}</span>`;
+            li.title = file.name;
+            children.appendChild(li);
+            continue;
+        }
+
         const fi = document.createElement('div');
         fi.className = 'tree-item';
         fi.style.paddingLeft = (8 + (depth + 1) * 16 + 20) + 'px';

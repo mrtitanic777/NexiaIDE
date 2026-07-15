@@ -737,7 +737,10 @@ function registerIpcHandlers() {
     /** Parse a project and report what WOULD be imported — nothing is written. */
     ipcMain.handle(IPC.VS_PREVIEW, async (_e, projectPath: string) => {
         try {
-            const p = parseVsProject(projectPath);
+            // The SDK root has to be passed here too, or the preview shows a
+            // different library list than the import produces — referenced libs
+            // (the ATG framework) would be missing from what the user is shown.
+            const p = parseVsProject(projectPath, toolchain.getPaths()?.root);
             return {
                 success: true,
                 preview: {
@@ -754,6 +757,16 @@ function registerIpcHandlers() {
                     enableRtti: p.enableRtti,
                     optimizationOverride: p.optimizationOverride,
                     warnings: p.warnings,
+                    // Referenced projects, so the dialog can say what happens to
+                    // each one instead of silently linking it.
+                    projectReferences: p.projectReferences.map(r => ({
+                        name: r.name,
+                        insideSdk: r.insideSdk,
+                        isStaticLibrary: r.isStaticLibrary,
+                        resolved: !!r.libPath,
+                        libPath: r.libPath,
+                    })),
+                    destination: PROJECTS_DIR,
                 },
             };
         } catch (err: any) {
@@ -762,18 +775,27 @@ function registerIpcHandlers() {
     });
 
     /** Do the import: copy sources into a new Nexia project and write nexia.json. */
-    ipcMain.handle(IPC.VS_IMPORT, async (_e, opts: { projectPath: string; destDir?: string; name?: string }) => {
+    ipcMain.handle(IPC.VS_IMPORT, async (_e, opts: { projectPath: string; destDir?: string; name?: string; solutionPath?: string }) => {
         try {
-            let destDir = opts.destDir;
-            if (!destDir) {
-                const r = await dialog.showOpenDialog(mainWindow!, {
-                    title: 'Where should the imported project go?',
-                    properties: ['openDirectory', 'createDirectory'],
-                });
-                if (r.canceled || !r.filePaths.length) return { success: false, error: 'Cancelled' };
-                destDir = r.filePaths[0];
+            // No folder prompt. Imported projects belong alongside every other
+            // Nexia project; asking the user to choose was busywork with a wrong
+            // answer available. destDir is still honoured if a caller passes one.
+            const destDir = opts.destDir || PROJECTS_DIR;
+            fs.mkdirSync(destDir, { recursive: true });
+
+            // importVsProject refuses to write into a non-empty directory, so
+            // find a free name rather than failing on a second import.
+            let name = opts.name;
+            if (!name) {
+                const base = parseVsProject(opts.projectPath, toolchain.getPaths()?.root).name;
+                name = base;
+                for (let i = 2; fs.existsSync(path.join(destDir, name)) &&
+                                fs.readdirSync(path.join(destDir, name)).length > 0; i++) {
+                    name = `${base}-${i}`;
+                }
             }
-            const report = importVsProject(opts.projectPath, destDir, opts.name);
+
+            const report = importVsProject(opts.projectPath, destDir, name, toolchain.getPaths()?.root, opts.solutionPath);
             // Make it the open project so the user lands straight in it.
             await projectManager.open(report.config.path);
             return { success: true, report };
@@ -865,8 +887,22 @@ function registerIpcHandlers() {
             //
             // Setup waits for this process to release its files before extracting,
             // so quitting promptly is what lets the update proceed.
+            // /S            — install with no prompts and no wizard.
+            // --force-run    — relaunch the app when it's done.
+            // --updated      — tell setup this is an update, not a first install.
+            //
+            // --force-run is not optional. electron-builder's assisted installer
+            // only restarts the app when BOTH --force-run and /S are given:
+            //
+            //   ${if} ${isForceRun}
+            //   ${andIf} ${Silent}
+            //     !insertmacro doStartApp
+            //
+            // Without it setup installs, exits, and leaves the user with nothing
+            // running. The wizard's "run after finish" checkbox does not cover
+            // this — silent installs never reach the finish page.
             const { spawn } = require('child_process');
-            const child = spawn(filePath, ['/S'], {
+            const child = spawn(filePath, ['/S', '--force-run', '--updated'], {
                 detached: true,       // must outlive us — we are what it replaces
                 stdio: 'ignore',
             });

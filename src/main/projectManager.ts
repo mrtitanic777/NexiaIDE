@@ -817,7 +817,10 @@ int MyLib_DoWork(const char* input, char* output, int outputSize)
         const entries = fs.readdirSync(dirPath, { withFileTypes: true });
         const nodes: FileNode[] = [];
 
-        const ignored = new Set(['node_modules', '.git', 'out', '.vs', '__pycache__']);
+        // nexia.json is the project's own config: the IDE edits it through Project
+        // Properties, so showing it in the tree just invites hand-editing the file
+        // the IDE is actively writing. It stays on disk — only the tree hides it.
+        const ignored = new Set(['node_modules', '.git', 'out', '.vs', '__pycache__', PROJECT_FILE]);
 
         for (const entry of entries) {
             if (entry.name.startsWith('.') && entry.name !== '.gitignore') continue;

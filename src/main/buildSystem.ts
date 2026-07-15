@@ -8,7 +8,26 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { spawn, ChildProcess } from 'child_process';
 import { Toolchain } from './toolchain';
-import { BuildConfig, BuildResult, BuildMessage, ProjectConfig } from '../shared/types';
+import { BuildConfig, BuildResult, BuildMessage, ProjectConfig, BuildConfiguration } from '../shared/types';
+
+/**
+ * The libraries/defines/paths that apply to the configuration being built.
+ *
+ * Visual Studio keeps these per configuration, because the Xbox 360 SDK ships a
+ * different library flavour for each one (d3d9d / d3d9i / d3d9 / d3d9ltcg). The
+ * VS importer records them under project.configurations; anything without an
+ * entry — a hand-made Nexia project, or one imported before this existed —
+ * falls back to the flat fields, so nothing has to be migrated.
+ */
+function effectiveSettings(project: ProjectConfig, cfg: BuildConfiguration) {
+    const o = project.configurations?.[cfg];
+    return {
+        libraries: o?.libraries ?? project.libraries ?? [],
+        defines: o?.defines ?? project.defines ?? [],
+        includeDirectories: o?.includeDirectories ?? project.includeDirectories ?? [],
+        libraryDirectories: o?.libraryDirectories ?? project.libraryDirectories ?? [],
+    };
+}
 
 /**
  * Generate a unique .obj filename from a source path by incorporating the
@@ -107,7 +126,7 @@ export class BuildSystem {
             configuration,
             compilerFlags: config?.compilerFlags || [],
             linkerFlags: config?.linkerFlags || [],
-            defines: config?.defines || project.defines || [],
+            defines: config?.defines || effectiveSettings(project, configuration).defines,
             outputDir: config?.outputDir || path.join(project.path, 'out', configuration),
         };
 
@@ -532,7 +551,7 @@ export class BuildSystem {
         // Project source dir
         args.push(`/I"${path.join(project.path, 'src')}"`);
         args.push(`/I"${project.path}"`);
-        for (const inc of (project.includeDirectories || [])) {
+        for (const inc of effectiveSettings(project, config.configuration).includeDirectories) {
             const incPath = path.isAbsolute(inc) ? inc : path.join(project.path, inc);
             args.push(`/I"${incPath}"`);
         }
@@ -544,7 +563,25 @@ export class BuildSystem {
             args.push('/O2', '/Ox', '/DNDEBUG', '/GS-');
         } else if (config.configuration === 'Profile') {
             args.push('/O2', '/Zi', `/Fd"${path.join(config.outputDir, 'vc100.pdb')}"`, '/DNDEBUG', '/DPROFILE', '/GS-');
+        } else if (config.configuration === 'Release_LTCG') {
+            // Link-Time Code Generation: /GL defers codegen to the linker so it can
+            // optimise across translation units. It pairs with /LTCG on the link
+            // step — /GL objects are not real object files and a plain link fails.
+            args.push('/O2', '/Ox', '/DNDEBUG', '/DLTCG', '/GS-', '/GL');
         }
+
+        // C runtime — must match the configuration's _DEBUG setting.
+        //
+        // Without this, cl.exe defaults to /MT (release CRT) while a Debug build
+        // defines _DEBUG. The CRT/STL headers then emit debug-only assertion
+        // calls — _CrtDbgReportW from std::vector::operator[], vcompd.lib and
+        // friends — which live only in the debug CRT, and the link fails with a
+        // single baffling unresolved external.
+        //
+        // Defaults match Visual Studio's Xbox 360 defaults: MultiThreadedDebug
+        // for Debug, MultiThreaded otherwise.
+        const crt = project.runtimeLibrary ?? (config.configuration === 'Debug' ? 'MTd' : 'MT');
+        args.push(`/${crt}`);
 
         // Xbox 360 specific defines
         args.push('/D_XBOX', '/DXBOX', '/D_XBOX_VER=200');
@@ -630,43 +667,70 @@ export class BuildSystem {
         // Library paths
         const xboxLib = path.join(sdkPaths.lib, 'xbox');
         if (fs.existsSync(xboxLib)) args.push(`/LIBPATH:"${xboxLib}"`);
-        for (const libDir of (project.libraryDirectories || [])) {
+        for (const libDir of effectiveSettings(project, config.configuration).libraryDirectories) {
             const libPath = path.isAbsolute(libDir) ? libDir : path.join(project.path, libDir);
             args.push(`/LIBPATH:"${libPath}"`);
         }
 
-        // Default Xbox 360 libraries — matches VS2010 Xbox 360 project defaults
-        const isDebug = config.configuration === 'Debug';
-        const defaultLibs = [
-            // Core runtime
-            isDebug ? 'xapilibd.lib' : 'xapilib.lib',
-            'xboxkrnl.lib',
-            // Direct3D
-            isDebug ? 'd3d9d.lib'    : 'd3d9.lib',
-            isDebug ? 'd3dx9d.lib'   : 'd3dx9.lib',
-            isDebug ? 'xgraphicsd.lib' : 'xgraphics.lib',
-            // Audio
-            isDebug ? 'xaudiod2.lib' : 'xaudio2.lib',
-            isDebug ? 'xactd3.lib'   : 'xact3.lib',
-            isDebug ? 'x3daudiod.lib': 'x3daudio.lib',
-            // Math / utility
-            isDebug ? 'xmcored.lib'  : 'xmcore.lib',
-            // Networking
-            isDebug ? 'xnetd.lib'    : 'xnet.lib',
-            // Input
-            isDebug ? 'xinput2d.lib' : 'xinput2.lib',
-            // Parallelism
-            isDebug ? 'vcompd.lib'   : 'vcomp.lib',
-        ];
-        if (isDebug) defaultLibs.push('xbdm.lib');
-        args.push(...defaultLibs);
+        // Default Xbox 360 libraries.
+        //
+        // The XDK ships FOUR flavours of most libs, not two, and the suffix is
+        // per-configuration — taken from what VS2010 puts in AdditionalDependencies:
+        //
+        //   Debug         d3d9d.lib      xact3d.lib      xmcored.lib     (+xbdm)
+        //   Profile       d3d9i.lib      xact3i.lib      xmcorei.lib     (+xbdm)  "i" = instrumented
+        //   Release       d3d9.lib       xact3.lib       xmcore.lib
+        //   Release_LTCG  d3d9ltcg.lib   xact3ltcg.lib   xmcoreltcg.lib
+        //
+        // This used to be `isDebug ? 'd3d9d.lib' : 'd3d9.lib'`, which meant Profile
+        // silently linked the Release libs rather than the instrumented ones, and
+        // Release_LTCG had no libs of its own at all.
+        const cfg = config.configuration;
+        const LIBS: Record<string, string[]> = {
+            Debug: [
+                'xapilibd.lib', 'xboxkrnl.lib',
+                'd3d9d.lib', 'd3dx9d.lib', 'xgraphicsd.lib',
+                'xaudiod2.lib', 'xactd3.lib', 'x3daudiod.lib',
+                'xmcored.lib', 'xnetd.lib', 'xinput2d.lib', 'vcompd.lib',
+                'xbdm.lib',
+            ],
+            Profile: [
+                'xapilibi.lib', 'xboxkrnl.lib',
+                'd3d9i.lib', 'd3dx9.lib', 'xgraphics.lib',
+                'xaudio2.lib', 'xact3i.lib', 'x3daudioi.lib',
+                'xmcorei.lib', 'xnet.lib', 'xinput2.lib', 'vcomp.lib',
+                'xbdm.lib',
+            ],
+            Release: [
+                'xapilib.lib', 'xboxkrnl.lib',
+                'd3d9.lib', 'd3dx9.lib', 'xgraphics.lib',
+                'xaudio2.lib', 'xact3.lib', 'x3daudio.lib',
+                'xmcore.lib', 'xnet.lib', 'xinput2.lib', 'vcomp.lib',
+            ],
+            Release_LTCG: [
+                'xapilib.lib', 'xboxkrnl.lib',
+                'd3d9ltcg.lib', 'd3dx9.lib', 'xgraphics.lib',
+                'xaudio2.lib', 'xact3ltcg.lib', 'x3daudioltcg.lib',
+                'xmcoreltcg.lib', 'xnet.lib', 'xinput2.lib', 'vcomp.lib',
+            ],
+        };
+        args.push(...(LIBS[cfg] || LIBS.Release));
 
-        // SDK headers auto-link xapilib.lib via #pragma comment(lib).
-        // Suppress the release version so it doesn't conflict with xapilibd.lib.
-        if (isDebug) args.push('/NODEFAULTLIB:xapilib.lib');
+        // SDK headers auto-link xapilib.lib via #pragma comment(lib). Suppress it
+        // wherever we link a different flavour, or both end up on the command line
+        // and the linker reports duplicate symbols.
+        if (cfg === 'Debug') args.push('/NODEFAULTLIB:xapilib.lib');
+        else if (cfg === 'Profile') args.push('/NODEFAULTLIB:xapilib.lib');
 
-        // User libraries
-        for (const lib of (project.libraries || [])) args.push(lib);
+        // User libraries — this configuration's, not whichever set was imported.
+        for (const lib of effectiveSettings(project, config.configuration).libraries) args.push(lib);
+
+        // Link-time code generation — must match the /GL used when compiling.
+        // /LTCG is incompatible with /INCREMENTAL, so it goes before the debug
+        // block and Release_LTCG deliberately takes neither.
+        if (config.configuration === 'Release_LTCG') {
+            args.push('/LTCG');
+        }
 
         // Debug info
         if (config.configuration === 'Debug' || config.configuration === 'Profile') {

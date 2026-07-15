@@ -17,7 +17,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { ProjectConfig } from '../shared/types';
+import { ProjectConfig, BuildConfiguration, ConfigurationSettings, SolutionInfo, SolutionProject } from '../shared/types';
 
 // ══════════════════════════════════════
 //  TYPES
@@ -36,11 +36,38 @@ export interface VsSolutionInfo {
     projects: VsProjectRef[];
 }
 
+/**
+ * A <ProjectReference> — another project this one depends on.
+ *
+ * These matter because Visual Studio links a referenced static library
+ * IMPLICITLY ("Link Library Dependencies" defaults to true), so the .vcxproj
+ * never names the .lib in AdditionalDependencies. Reading only that list gives
+ * you every SDK lib and silently omits the referenced one — the headers resolve
+ * and the link fails.
+ */
+export interface VsProjectReference {
+    /** Absolute path to the referenced .vcxproj/.vcproj */
+    path: string;
+    /** <ProjectName> if declared, else the filename. AtgFramework2010.vcxproj declares "AtgFramework". */
+    name: string;
+    exists: boolean;
+    /** Only static libraries produce a .lib to link. */
+    isStaticLibrary: boolean;
+    /** Absolute path to the prebuilt output, when it could be resolved AND exists. */
+    libPath?: string;
+    /** The referenced project lives inside the Xbox 360 SDK, so it is not the user's code. */
+    insideSdk: boolean;
+}
+
 export interface ParsedVsProject {
     name: string;
     projectPath: string;
     format: 'vcxproj' | 'vcproj';
     type: ProjectConfig['type'];
+    /** Projects this one references. See VsProjectReference. */
+    projectReferences: VsProjectReference[];
+    /** Per-configuration libs/defines/paths, read from every ItemDefinitionGroup. */
+    configurations: Partial<Record<BuildConfiguration, ConfigurationSettings>>;
     /** Source/header/other files, relative to the project dir */
     sources: string[];
     headers: string[];
@@ -52,6 +79,8 @@ export interface ParsedVsProject {
     pchHeader?: string;
     enableRtti?: boolean;
     exceptionHandling?: 'sync' | 'async' | 'none';
+    /** /MT, /MTd, /MD, /MDd — must agree with _DEBUG or the CRT link fails. */
+    runtimeLibrary?: ProjectConfig['runtimeLibrary'];
     warningLevel?: 0 | 1 | 2 | 3 | 4;
     treatWarningsAsErrors?: boolean;
     optimizationOverride?: 'disabled' | 'minSize' | 'maxSpeed' | 'full' | 'default';
@@ -142,6 +171,29 @@ function mapOptimization(v: string | null): ParsedVsProject['optimizationOverrid
     return 'default';
 }
 
+/**
+ * <RuntimeLibrary> → the cl.exe switch.
+ *
+ * Dropping this is what left an imported Debug project linking against the
+ * release CRT: _DEBUG was defined but /MTd was not passed, so _CrtDbgReportW
+ * (debug-CRT only) came out unresolved.
+ */
+function mapRuntimeLibrary(v: string | null): ProjectConfig['runtimeLibrary'] {
+    switch ((v || '').trim()) {
+        // .vcxproj spells it out
+        case 'MultiThreaded':          return 'MT';
+        case 'MultiThreadedDebug':     return 'MTd';
+        case 'MultiThreadedDLL':       return 'MD';
+        case 'MultiThreadedDebugDLL':  return 'MDd';
+        // .vcproj uses the numeric enum
+        case '0': return 'MT';
+        case '1': return 'MTd';
+        case '2': return 'MD';
+        case '3': return 'MDd';
+        default: return undefined;   // let the build system pick from the configuration
+    }
+}
+
 function mapExceptions(v: string | null): ParsedVsProject['exceptionHandling'] {
     if (!v) return undefined;
     if (/^(Sync|true|1|Cpp)$/i.test(v)) return 'sync';
@@ -191,16 +243,152 @@ export function parseSolution(slnPath: string): VsSolutionInfo {
 }
 
 // ══════════════════════════════════════
+//  PROJECT REFERENCES
+// ══════════════════════════════════════
+
+/**
+ * Read a property whose Condition selects a configuration, e.g.
+ *   <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|Xbox 360'">...</OutDir>
+ * Falls back to an unconditional <Tag> if no conditional one matches.
+ */
+function condProp(xml: string, tag: string, configuration: string): string | null {
+    const re = new RegExp(
+        `<${tag}\\s+Condition="[^"]*?'${configuration}\\|[^"]*?"\\s*>([\\s\\S]*?)<\\/${tag}>`, 'i');
+    const hit = re.exec(xml);
+    if (hit) return unescapeMsbuild(hit[1].trim());
+    return tagText(xml, tag);
+}
+
+/**
+ * Work out the .lib a referenced project produces.
+ *
+ * Expands the MSBuild macros these files rely on:
+ *   $(ProjectDir)    — the referenced project's own directory
+ *   $(Configuration) — the configuration being imported
+ *   $(ProjectName)   — <ProjectName> if declared, else the file name
+ *   $(OutDir)        — resolved first, then substituted into OutputFile
+ *
+ * The ATG framework is the case that proves each of these is needed:
+ *   <ProjectName>AtgFramework</ProjectName>          (file is AtgFramework2010.vcxproj)
+ *   <OutDir     ...>$(ProjectDir)$(Configuration)\</OutDir>
+ *   <OutputFile ...>$(OutDir)$(ProjectName).lib</OutputFile>
+ * which for Debug resolves to <SDK>\Source\Samples\Common\Debug\AtgFramework.lib.
+ */
+function resolveProjectReference(refPath: string, configuration: string, sdkRoot?: string): VsProjectReference {
+    const fileName = path.basename(refPath, path.extname(refPath));
+    const insideSdk = !!sdkRoot &&
+        path.resolve(refPath).toLowerCase().startsWith(path.resolve(sdkRoot).toLowerCase() + path.sep);
+
+    if (!fs.existsSync(refPath)) {
+        return { path: refPath, name: fileName, exists: false, isStaticLibrary: false, insideSdk };
+    }
+
+    let xml = '';
+    try { xml = fs.readFileSync(refPath, 'utf-8'); } catch {
+        return { path: refPath, name: fileName, exists: false, isStaticLibrary: false, insideSdk };
+    }
+
+    const name = tagText(xml, 'ProjectName') || fileName;
+    const cfgType = condProp(xml, 'ConfigurationType', configuration) || '';
+    const isStaticLibrary = /StaticLibrary/i.test(cfgType);
+    if (!isStaticLibrary) {
+        return { path: refPath, name, exists: true, isStaticLibrary: false, insideSdk };
+    }
+
+    const projectDir = path.dirname(refPath) + path.sep;
+    const expand = (v: string) => v
+        .replace(/\$\(ProjectDir\)/gi, projectDir)
+        .replace(/\$\(Configuration\)/gi, configuration)
+        .replace(/\$\(ProjectName\)/gi, name);
+
+    // OutDir may be relative to the project (the ATG project uses a bare
+    // "Profile\" for some configurations), so resolve it against projectDir.
+    const rawOutDir = condProp(xml, 'OutDir', configuration) || `$(ProjectDir)$(Configuration)\\`;
+    const outDir = path.resolve(projectDir, expand(rawOutDir));
+
+    const rawOutFile = condProp(xml, 'OutputFile', configuration) || `$(OutDir)$(ProjectName).lib`;
+    const outFile = expand(rawOutFile).replace(/\$\(OutDir\)/gi, outDir + path.sep);
+    const libPath = path.resolve(projectDir, outFile);
+
+    return {
+        path: refPath,
+        name,
+        exists: true,
+        isStaticLibrary: true,
+        libPath: fs.existsSync(libPath) ? libPath : undefined,
+        insideSdk,
+    };
+}
+
+/** Parse <ProjectReference Include="..."> items out of a .vcxproj. */
+function parseProjectReferences(xml: string, projPath: string, configuration: string, sdkRoot?: string): VsProjectReference[] {
+    const out: VsProjectReference[] = [];
+    const re = /<ProjectReference\s+Include="([^"]+)"/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(xml)) !== null) {
+        const rel = toHostPath(unescapeMsbuild(m[1]));
+        if (isUnresolvableMacro(rel)) continue;
+        const abs = path.resolve(path.dirname(projPath), rel);
+        out.push(resolveProjectReference(abs, configuration, sdkRoot));
+    }
+    return out;
+}
+
+// ══════════════════════════════════════
 //  PROJECT (.vcxproj / .vcproj)
 // ══════════════════════════════════════
 
-export function parseVsProject(projPath: string): ParsedVsProject {
+/**
+ * The configuration an imported project opens in. Nexia projects are created as
+ * Debug, and this must agree with ProjectConfig.configuration.
+ */
+const IMPORT_CONFIGURATION = 'Debug';
+
+/**
+ * Every configuration we import settings for.
+ *
+ * All four are read, not just Debug: the Xbox 360 SDK ships a different library
+ * flavour per configuration (d3d9d / d3d9i / d3d9 / d3d9ltcg), so keeping only
+ * Debug's list meant switching to Release_LTCG still linked Debug's libs.
+ */
+const VS_CONFIGURATIONS: BuildConfiguration[] = ['Debug', 'Release', 'Profile', 'Release_LTCG'];
+
+/**
+ * Pull the ClCompile/Link settings out of one configuration's
+ * ItemDefinitionGroup. Returns null when the project has no such configuration.
+ */
+function parseConfigGroup(groups: string[], configuration: string): ConfigurationSettings | null {
+    // Match on 'Debug|' etc. so Release doesn't also match Release_LTCG.
+    const group = groups.find(g => new RegExp(`'${configuration}\\|`, 'i').test(g));
+    if (!group) return null;
+
+    const clBlock = /<ClCompile>([\s\S]*?)<\/ClCompile>/i.exec(group)?.[1] || '';
+    const linkBlock = /<Link>([\s\S]*?)<\/Link>/i.exec(group)?.[1] || '';
+
+    const { kept: includeDirectories } = filterPaths(splitList(tagText(clBlock, 'AdditionalIncludeDirectories')));
+    const { kept: libraryDirectories } = filterPaths(splitList(tagText(linkBlock, 'AdditionalLibraryDirectories')));
+
+    return {
+        libraries: splitList(tagText(linkBlock, 'AdditionalDependencies')).filter(l => !isUnresolvableMacro(l)),
+        defines: splitList(tagText(clBlock, 'PreprocessorDefinitions')).filter(d => !isUnresolvableMacro(d)),
+        includeDirectories,
+        libraryDirectories,
+    };
+}
+
+/**
+ * @param sdkRoot Xbox 360 SDK root, when detected. Used to recognise referenced
+ *                projects that live inside the SDK (the ATG framework), which
+ *                are Microsoft's code and ship prebuilt — they get linked, not
+ *                copied into the user's project.
+ */
+export function parseVsProject(projPath: string, sdkRoot?: string): ParsedVsProject {
     const ext = path.extname(projPath).toLowerCase();
-    return ext === '.vcproj' ? parseVcproj(projPath) : parseVcxproj(projPath);
+    return ext === '.vcproj' ? parseVcproj(projPath) : parseVcxproj(projPath, sdkRoot);
 }
 
 /** VS2010+ MSBuild format. */
-function parseVcxproj(projPath: string): ParsedVsProject {
+function parseVcxproj(projPath: string, sdkRoot?: string): ParsedVsProject {
     const xml = fs.readFileSync(projPath, 'utf-8');
     const warnings: string[] = [];
 
@@ -222,6 +410,15 @@ function parseVcxproj(projPath: string): ParsedVsProject {
     // Prefer the Debug ItemDefinitionGroup; fall back to the first one present.
     const groups = xml.match(/<ItemDefinitionGroup[\s\S]*?<\/ItemDefinitionGroup>/gi) || [];
     const debugGroup = groups.find(g => /Debug\|/i.test(g)) || groups[0] || '';
+
+    // Read EVERY configuration, not just Debug. The Xbox 360 SDK ships a
+    // different library flavour per configuration, so keeping only Debug's list
+    // left Release/Profile/Release_LTCG linking Debug's libs.
+    const configurations: Partial<Record<BuildConfiguration, ConfigurationSettings>> = {};
+    for (const cfg of VS_CONFIGURATIONS) {
+        const parsed = parseConfigGroup(groups, cfg);
+        if (parsed) configurations[cfg] = parsed;
+    }
     const clBlock = /<ClCompile>([\s\S]*?)<\/ClCompile>/i.exec(debugGroup)?.[1] || '';
     const linkBlock = /<Link>([\s\S]*?)<\/Link>/i.exec(debugGroup)?.[1] || '';
 
@@ -238,19 +435,78 @@ function parseVcxproj(projPath: string): ParsedVsProject {
     const cfgType = tagText(xml, 'ConfigurationType');
     const pch = inferPch(tagText(clBlock, 'PrecompiledHeaderFile'), tagText(clBlock, 'PrecompiledHeader'), headers);
 
+    // Referenced projects. Visual Studio links a referenced static library without
+    // ever naming it in AdditionalDependencies, so these have to be resolved
+    // separately or the import links against everything EXCEPT its dependency.
+    //
+    // Resolved per configuration: a referenced project builds its own .lib per
+    // configuration too (Common\Debug\AtgFramework.lib vs
+    // Common\Release_LTCG\AtgFramework.lib), so a single resolution would point
+    // every configuration at Debug's build.
+    const projectReferences = parseProjectReferences(xml, projPath, IMPORT_CONFIGURATION, sdkRoot);
+
+    for (const cfg of VS_CONFIGURATIONS) {
+        const settings = configurations[cfg];
+        if (!settings) continue;
+        const refs = parseProjectReferences(xml, projPath, cfg, sdkRoot);
+        const libs = settings.libraries || (settings.libraries = []);
+        const libDirs = settings.libraryDirectories || (settings.libraryDirectories = []);
+        for (const ref of refs) {
+            if (!ref.isStaticLibrary) continue;
+            if (!ref.libPath) {
+                // Resolvable for some configurations but not others: the Xbox 360
+                // SDK ships AtgFramework prebuilt for Debug, Release and
+                // Release_LTCG but NOT Profile. Say so per configuration rather
+                // than leaving that build to fail at link time with no clue why.
+                if (ref.exists && cfg !== IMPORT_CONFIGURATION) {
+                    warnings.push(
+                        `${cfg}: no built "${ref.name}" library was found, so this configuration won't link ` +
+                        `until you build ${ref.name} for ${cfg} in Visual Studio. ` +
+                        `${IMPORT_CONFIGURATION} is unaffected.`);
+                }
+                continue;
+            }
+            const libName = path.basename(ref.libPath);
+            if (!libs.some(l => l.toLowerCase() === libName.toLowerCase())) libs.push(libName);
+            const dir = path.dirname(ref.libPath);
+            if (!libDirs.includes(dir)) libDirs.push(dir);
+        }
+    }
+
+    // Warn once per reference rather than once per configuration.
+    for (const ref of projectReferences) {
+        if (!ref.isStaticLibrary) continue;
+        if (!ref.exists) {
+            warnings.push(`Referenced project not found on disk, so its library can't be linked: ${ref.path}`);
+        } else if (!ref.libPath) {
+            warnings.push(
+                `"${ref.name}" is referenced as a static library but its built .lib wasn't found. ` +
+                `Build it in Visual Studio (${IMPORT_CONFIGURATION} configuration) and re-import, or the link will fail.`);
+        }
+    }
+
+    // The flat fields stay in sync with the configuration the project opens in,
+    // so anything reading them without configuration awareness still behaves.
+    const opening = configurations[IMPORT_CONFIGURATION as BuildConfiguration];
+    const libs = opening?.libraries || rawLibs.filter(l => !isUnresolvableMacro(l));
+    const refLibDirs = (opening?.libraryDirectories || []).filter(d => !libraryDirectories.includes(d));
+
     return {
-        name: path.basename(projPath, path.extname(projPath)),
+        name: tagText(xml, 'ProjectName') || path.basename(projPath, path.extname(projPath)),
         projectPath: projPath,
         format: 'vcxproj',
         type: mapConfigurationType(cfgType),
+        projectReferences,
+        configurations,
         sources, headers, otherFiles,
         includeDirectories,
-        libraryDirectories,
-        libraries: rawLibs.filter(l => !isUnresolvableMacro(l)),
+        libraryDirectories: libraryDirectories.concat(refLibDirs),
+        libraries: libs,
         defines: rawDefines.filter(d => !isUnresolvableMacro(d)),
         pchHeader: pch || undefined,
         enableRtti: parseBool(tagText(clBlock, 'RuntimeTypeInfo')),
         exceptionHandling: mapExceptions(tagText(clBlock, 'ExceptionHandling')),
+        runtimeLibrary: mapRuntimeLibrary(tagText(clBlock, 'RuntimeLibrary')),
         warningLevel: mapWarningLevel(tagText(clBlock, 'WarningLevel')),
         treatWarningsAsErrors: parseBool(tagText(clBlock, 'TreatWarningAsError')),
         optimizationOverride: mapOptimization(tagText(clBlock, 'Optimization')),
@@ -307,6 +563,13 @@ function parseVcproj(projPath: string): ParsedVsProject {
         projectPath: projPath,
         format: 'vcproj',
         type: mapConfigurationType(cfgTypeAttr),
+        // The legacy format has no <ProjectReference>: VS2005/2008 recorded
+        // dependencies in the .sln's ProjectSection(ProjectDependencies) instead.
+        // Nothing to resolve from the project file alone.
+        projectReferences: [],
+        // Only the Debug <Configuration> block is read for .vcproj, so there are
+        // no per-configuration overrides to record.
+        configurations: {},
         sources, headers, otherFiles,
         includeDirectories,
         libraryDirectories,
@@ -315,6 +578,7 @@ function parseVcproj(projPath: string): ParsedVsProject {
         pchHeader: inferPch(attr(clTool, 'PrecompiledHeaderThrough'), attr(clTool, 'UsePrecompiledHeader'), headers),
         enableRtti: parseBool(attr(clTool, 'RuntimeTypeInfo')),
         exceptionHandling: mapExceptions(attr(clTool, 'ExceptionHandling')),
+        runtimeLibrary: mapRuntimeLibrary(attr(clTool, 'RuntimeLibrary')),
         warningLevel: mapWarningLevel(attr(clTool, 'WarningLevel')),
         treatWarningsAsErrors: parseBool(attr(clTool, 'WarnAsError')),
         optimizationOverride: mapOptimization(attr(clTool, 'Optimization')),
@@ -357,6 +621,80 @@ function inferPch(explicit: string | null, pchMode: string | null, headers: stri
 }
 
 // ══════════════════════════════════════
+//  SOLUTION INFO
+// ══════════════════════════════════════
+
+/**
+ * Record what the solution contained, for the Explorer.
+ *
+ * Two sources, because a dependency can appear in either:
+ *   - the .sln's Project(...) lines, when the import came from a solution
+ *   - the project's own <ProjectReference> items, which is where VS2010 puts
+ *     them and is the only source when a .vcxproj is imported directly
+ *
+ * Merged by path so a project listed in both doesn't appear twice.
+ */
+function buildSolutionInfo(
+    projPath: string,
+    name: string,
+    parsed: ParsedVsProject,
+    slnPath?: string,
+    sdkRoot?: string,
+): SolutionInfo | undefined {
+    const byPath = new Map<string, SolutionProject>();
+    const key = (p: string) => path.resolve(p).toLowerCase();
+
+    byPath.set(key(projPath), {
+        name,
+        path: projPath,
+        isCurrent: true,
+        insideSdk: false,
+    });
+
+    if (slnPath && fs.existsSync(slnPath)) {
+        for (const p of parseSolution(slnPath).projects) {
+            if (byPath.has(key(p.path))) continue;
+            const insideSdk = !!sdkRoot &&
+                path.resolve(p.path).toLowerCase().startsWith(path.resolve(sdkRoot).toLowerCase() + path.sep);
+            byPath.set(key(p.path), { name: p.name, path: p.path, isCurrent: false, insideSdk });
+        }
+    }
+
+    for (const ref of parsed.projectReferences) {
+        const existing = byPath.get(key(ref.path));
+        // Resolve the library this dependency contributes in each configuration,
+        // so the Explorer can show whether it's actually available per build.
+        const libPaths: Partial<Record<BuildConfiguration, string>> = {};
+        for (const cfg of VS_CONFIGURATIONS) {
+            const r = resolveProjectReference(ref.path, cfg, sdkRoot);
+            if (r.libPath) libPaths[cfg] = r.libPath;
+        }
+        if (existing) {
+            existing.libPaths = libPaths;
+            existing.insideSdk = ref.insideSdk;
+        } else {
+            byPath.set(key(ref.path), {
+                name: ref.name,
+                path: ref.path,
+                isCurrent: false,
+                insideSdk: ref.insideSdk,
+                libPaths,
+            });
+        }
+    }
+
+    const projects = [...byPath.values()];
+    // A lone project with no dependencies isn't a solution worth showing.
+    if (projects.length < 2 && !slnPath) return undefined;
+
+    return {
+        name: slnPath ? path.basename(slnPath, path.extname(slnPath)) : name,
+        path: slnPath,
+        projects,
+    };
+}
+
+// ══════════════════════════════════════
 //  IMPORT
 // ══════════════════════════════════════
 
@@ -365,8 +703,14 @@ function inferPch(explicit: string | null, pchMode: string | null, headers: stri
  * Files are COPIED (never moved) so the original VS project keeps working —
  * people are usually migrating gradually, not burning the boats.
  */
-export function importVsProject(projPath: string, destDir: string, projectName?: string): ImportReport {
-    const parsed = parseVsProject(projPath);
+/**
+ * @param slnPath When the import came from a .sln, its path — so the project can
+ *                record what the solution contained. Nexia builds one project,
+ *                but the Explorer shows the solution it belongs to and which
+ *                dependencies resolved.
+ */
+export function importVsProject(projPath: string, destDir: string, projectName?: string, sdkRoot?: string, slnPath?: string): ImportReport {
+    const parsed = parseVsProject(projPath, sdkRoot);
     const name = projectName || parsed.name;
     const srcRoot = path.dirname(projPath);
     const projectDir = path.resolve(destDir, name);
@@ -429,6 +773,16 @@ export function importVsProject(projPath: string, destDir: string, projectName?:
         d => `Kept as an absolute path (it lives outside the project, so it won't move with it): ${d}`
     );
 
+    // Say plainly what happened to each referenced project. Visual Studio links
+    // these implicitly, so without a note the user has no way to know a library
+    // was added on their behalf — or why one is missing.
+    for (const ref of parsed.projectReferences) {
+        if (!ref.isStaticLibrary || !ref.libPath) continue;
+        extraWarnings.push(ref.insideSdk
+            ? `"${ref.name}" comes from your Xbox 360 SDK, so it was linked from there rather than copied in: ${ref.libPath}`
+            : `"${ref.name}" is a library this project depends on. Linked its built output: ${ref.libPath}`);
+    }
+
     const config: ProjectConfig = {
         name,
         path: projectDir,
@@ -440,9 +794,21 @@ export function importVsProject(projPath: string, destDir: string, projectName?:
         libraries: parsed.libraries,
         defines: parsed.defines,
         configuration: 'Debug',
+        // Per-configuration overrides, so switching to Release/Profile/Release_LTCG
+        // links that configuration's SDK libs rather than Debug's. Library dirs are
+        // resolved the same way as the flat ones so they survive the project move.
+        configurations: Object.keys(parsed.configurations).length
+            ? Object.fromEntries(Object.entries(parsed.configurations).map(([cfg, s]) => [cfg, {
+                ...s,
+                includeDirectories: (s.includeDirectories || []).map(resolveDir),
+                libraryDirectories: (s.libraryDirectories || []).map(resolveDir),
+            }]))
+            : undefined,
+        solution: buildSolutionInfo(projPath, name, parsed, slnPath, sdkRoot),
         pchHeader: parsed.pchHeader,
         enableRtti: parsed.enableRtti,
         exceptionHandling: parsed.exceptionHandling,
+        runtimeLibrary: parsed.runtimeLibrary,
         warningLevel: parsed.warningLevel,
         treatWarningsAsErrors: parsed.treatWarningsAsErrors,
         optimizationOverride: parsed.optimizationOverride,

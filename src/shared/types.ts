@@ -26,6 +26,61 @@ export interface SdkTool {
 
 // ── Project Types ──
 
+export type BuildConfiguration = 'Debug' | 'Release' | 'Profile' | 'Release_LTCG';
+
+/**
+ * Settings that differ per configuration.
+ *
+ * The Xbox 360 SDK ships a different library flavour for each configuration
+ * (d3d9d / d3d9i / d3d9 / d3d9ltcg), so a single flat library list cannot be
+ * correct for more than one of them. Visual Studio stores these per
+ * configuration in its ItemDefinitionGroups; Nexia used to keep only the Debug
+ * set, which meant an imported project linked Debug's libs in every build.
+ *
+ * Anything omitted here falls back to the flat field on ProjectConfig, so
+ * projects written before this existed keep working unchanged.
+ */
+export interface ConfigurationSettings {
+    libraries?: string[];
+    defines?: string[];
+    includeDirectories?: string[];
+    libraryDirectories?: string[];
+}
+
+/**
+ * A project that sits alongside this one in the same solution.
+ *
+ * Visual Studio shows these at the top of Solution Explorer so you can see at a
+ * glance whether your dependencies are actually attached. Nexia had nowhere to
+ * record them, so an imported project silently forgot that AtgFramework existed
+ * even though it links against it.
+ */
+export interface SolutionProject {
+    name: string;
+    /** Absolute path to the original .vcxproj/.vcproj it came from. */
+    path: string;
+    /** This is the project Nexia opened; the others are dependencies. */
+    isCurrent: boolean;
+    /** Lives inside the Xbox 360 SDK, so it is Microsoft's and ships prebuilt. */
+    insideSdk: boolean;
+    /** Absolute path to the library it contributes, per configuration. */
+    libPaths?: Partial<Record<BuildConfiguration, string>>;
+}
+
+/**
+ * The Visual Studio solution an imported project came from.
+ *
+ * Nexia builds one project, not a whole solution — this is what lets the
+ * Explorer show what the solution contained and which dependencies resolved,
+ * rather than pretending the project stands alone.
+ */
+export interface SolutionInfo {
+    name: string;
+    /** Absolute path to the original .sln, when the import came from one. */
+    path?: string;
+    projects: SolutionProject[];
+}
+
 export interface ProjectConfig {
     name: string;
     path: string;
@@ -36,12 +91,31 @@ export interface ProjectConfig {
     libraryDirectories: string[];
     libraries: string[];
     defines: string[];
-    configuration: 'Debug' | 'Release' | 'Profile';
+    configuration: BuildConfiguration;
+    /**
+     * Per-configuration overrides. When a configuration has an entry here, it
+     * wins over the flat fields above; otherwise the flat fields apply. Written
+     * by the Visual Studio importer, which reads all four ItemDefinitionGroups.
+     */
+    configurations?: Partial<Record<BuildConfiguration, ConfigurationSettings>>;
+    /** The VS solution this was imported from, for the Solution Explorer. */
+    solution?: SolutionInfo;
     pchHeader?: string;  // Precompiled header name, e.g. "stdafx.h"
 
     // ── Advanced Compiler/Linker Settings ──
     enableRtti?: boolean;                    // /GR (true) or /GR- (false, default)
     exceptionHandling?: 'sync' | 'async' | 'none';  // /EHsc, /EHa, or omitted
+
+    /**
+     * C runtime to link: /MT, /MTd, /MD, /MDd.
+     *
+     * Must agree with _DEBUG. A Debug build defines _DEBUG, which makes the CRT
+     * and STL headers emit assertion calls (_CrtDbgReportW) that exist ONLY in
+     * the debug CRT — so compiling Debug against /MT fails to link with exactly
+     * one unresolved external. Defaults to /MTd for Debug and /MT otherwise,
+     * matching Visual Studio's Xbox 360 defaults.
+     */
+    runtimeLibrary?: 'MT' | 'MTd' | 'MD' | 'MDd';
     warningLevel?: 0 | 1 | 2 | 3 | 4;      // /W0 through /W4 (default: 3)
     treatWarningsAsErrors?: boolean;         // /WX
     optimizationOverride?: 'disabled' | 'minSize' | 'maxSpeed' | 'full' | 'default';  // /Od, /O1, /O2, /Ox — overrides config defaults
@@ -65,7 +139,7 @@ export interface ProjectTemplate {
 // ── Build Types ──
 
 export interface BuildConfig {
-    configuration: 'Debug' | 'Release' | 'Profile';
+    configuration: 'Debug' | 'Release' | 'Profile' | 'Release_LTCG';
     compilerFlags: string[];
     linkerFlags: string[];
     defines: string[];
