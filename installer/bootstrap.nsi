@@ -41,7 +41,19 @@ Unicode true
 Name "${APPNAME}"
 OutFile "..\dist\NexiaSetup.exe"
 InstallDir "$LOCALAPPDATA\Programs\NexiaIDE"
-InstallDirRegKey HKCU "${REGKEY}" "InstallLocation"
+
+; No InstallDirRegKey.
+;
+; It set $INSTDIR from whatever InstallLocation the LAST run recorded, which
+; makes a stale or wrong key silently redirect the install: a run with /D= writes
+; that path into the key, and the next run without /D= reads it back and installs
+; there instead. That turned two updates into 6-minute builds into a deleted temp
+; folder, both reporting "Done." while the real install sat untouched.
+;
+; The install location is not a thing that should be remembered and replayed:
+; it is $LOCALAPPDATA\Programs\NexiaIDE unless the caller says otherwise with
+; /D=, and /D= overrides InstallDir directly. A user who installs somewhere
+; custom passes /D= again, which is the same thing the updater does.
 ; Per-user: no elevation, so updates never need a UAC prompt.
 RequestExecutionLevel user
 ShowInstDetails show
