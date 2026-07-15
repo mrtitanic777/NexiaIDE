@@ -45,6 +45,16 @@ export interface ConfigurationSettings {
     defines?: string[];
     includeDirectories?: string[];
     libraryDirectories?: string[];
+    /**
+     * The C runtime for THIS configuration.
+     *
+     * Must be per-configuration. Stored as a single top-level value it took the
+     * Debug group's /MTd and applied it to every build: /MTd implies _DEBUG, so
+     * the SDK headers then #pragma comment(lib, "xapilibd.lib") and the debug
+     * XAPILIB linked alongside the release one — 37 duplicate-symbol errors in
+     * Release, Profile and Release_LTCG, while Debug looked fine.
+     */
+    runtimeLibrary?: ProjectConfig['runtimeLibrary'];
 }
 
 /**

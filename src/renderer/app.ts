@@ -715,7 +715,7 @@ function showUpdateModal(u: any, currentVersion: string) {
         <div style="padding:20px 22px 0">
             <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
                 <span style="font-size:20px">🚀</span>
-                <div style="font-size:16px;font-weight:600;color:var(--text)">NexiaIDE v${escapeHtml(u.version)} has been released!</div>
+                <div style="font-size:16px;font-weight:600;color:var(--text)">Nexia IDE v${escapeHtml(displayVersion(u.version))} has been released!</div>
             </div>
             <div style="font-size:12.5px;color:var(--text-dim);margin-left:30px">${escapeHtml(u.title || '')}</div>
         </div>
@@ -727,7 +727,7 @@ function showUpdateModal(u: any, currentVersion: string) {
                     : '<div style="font-size:12.5px;color:var(--text-dim)">General improvements and fixes.</div>'}
             </div>
             <div style="display:flex;gap:10px;font-size:11px;color:var(--text-muted);margin-top:10px">
-                <span>You have v${escapeHtml(currentVersion)}</span>${sizeMb ? `<span>·</span><span>Download ${sizeMb}</span>` : ''}${u.mandatory ? '<span>·</span><span style="color:var(--yellow)">Required update</span>' : ''}
+                <span>You have v${escapeHtml(displayVersion(currentVersion))}</span>${sizeMb ? `<span>·</span><span>Download ${sizeMb}</span>` : ''}${u.mandatory ? '<span>·</span><span style="color:var(--yellow)">Required update</span>' : ''}
             </div>
             <div id="upd-prog" style="display:none;margin-top:14px">
                 <div style="height:6px;background:var(--bg-dark);border-radius:3px;overflow:hidden"><div id="upd-bar" style="height:100%;width:0%;background:var(--green);transition:width .15s"></div></div>
@@ -3517,7 +3517,7 @@ function showSettingsPanel() {
     // decides whether an update is offered.
     ipcRenderer.invoke('app:version').then((v: string) => {
         const el = $('sp-version');
-        if (el) el.textContent = `Nexia IDE ${v}`;
+        if (el) el.textContent = `Nexia IDE ${displayVersion(v)}`;
     }).catch(() => {
         const el = $('sp-version');
         if (el) el.textContent = '';
@@ -4554,6 +4554,22 @@ function triggerAchievement(id: string) {
 //  LEARN PANEL (sidebar)
 // ══════════════════════════════════════
 /** Compare dotted version strings. Returns >0 if a is newer, <0 if older, 0 if equal. */
+/**
+ * Version as shown to a person: 3.1.0 -> "3.1".
+ *
+ * Nexia versions as major.minor, but package.json must hold semver — npm and
+ * electron-builder both reject a two-part version — so the third part exists
+ * only to satisfy them and is noise everywhere a human reads it.
+ *
+ * A non-zero patch is left alone: if 3.1.2 ever ships, hiding the .2 would make
+ * two different builds look identical.
+ */
+function displayVersion(v: string | undefined | null): string {
+    const s = String(v ?? '').trim();
+    const m = /^(\d+)\.(\d+)\.0$/.exec(s);
+    return m ? `${m[1]}.${m[2]}` : s;
+}
+
 function cmpVersions(a: string, b: string): number {
     const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
     const pb = String(b || '0').split('.').map(n => parseInt(n, 10) || 0);

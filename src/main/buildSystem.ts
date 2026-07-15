@@ -26,6 +26,20 @@ function effectiveSettings(project: ProjectConfig, cfg: BuildConfiguration) {
         defines: o?.defines ?? project.defines ?? [],
         includeDirectories: o?.includeDirectories ?? project.includeDirectories ?? [],
         libraryDirectories: o?.libraryDirectories ?? project.libraryDirectories ?? [],
+        /**
+         * The C runtime, per configuration.
+         *
+         * The flat project.runtimeLibrary is only a fallback now. An import
+         * recorded the Debug group's /MTd there and it applied to every build:
+         * /MTd implies _DEBUG, the SDK headers then pragma-link xapilibd.lib,
+         * and it collided with the release xapilib for 37 duplicate-symbol
+         * errors in Release, Profile and Release_LTCG. Debug built fine, so the
+         * import looked correct.
+         *
+         * Undefined here means "let the caller pick from the configuration",
+         * which is the correct default and what a hand-made project wants.
+         */
+        runtimeLibrary: o?.runtimeLibrary ?? project.runtimeLibrary,
     };
 }
 
@@ -580,7 +594,8 @@ export class BuildSystem {
         //
         // Defaults match Visual Studio's Xbox 360 defaults: MultiThreadedDebug
         // for Debug, MultiThreaded otherwise.
-        const crt = project.runtimeLibrary ?? (config.configuration === 'Debug' ? 'MTd' : 'MT');
+        const crt = effectiveSettings(project, config.configuration).runtimeLibrary
+            ?? (config.configuration === 'Debug' ? 'MTd' : 'MT');
         args.push(`/${crt}`);
 
         // Xbox 360 specific defines

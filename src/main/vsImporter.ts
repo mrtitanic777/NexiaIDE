@@ -373,6 +373,12 @@ function parseConfigGroup(groups: string[], configuration: string): Configuratio
         defines: splitList(tagText(clBlock, 'PreprocessorDefinitions')).filter(d => !isUnresolvableMacro(d)),
         includeDirectories,
         libraryDirectories,
+        // Per-configuration, and it has to be: Visual Studio uses /MTd for Debug
+        // and /MT for the rest. Importing Debug's value as one project-wide
+        // setting put /MTd on every build, which implies _DEBUG, which makes the
+        // SDK headers pull in xapilibd.lib next to the release xapilib — 37
+        // duplicate-symbol errors in every configuration except Debug.
+        runtimeLibrary: mapRuntimeLibrary(tagText(clBlock, 'RuntimeLibrary')),
     };
 }
 
