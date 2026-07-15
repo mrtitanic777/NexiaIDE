@@ -2,16 +2,17 @@
   "name": "nexia-ide",
   "displayName": "Nexia IDE",
   "description": "Xbox 360 Development Environment & Adaptive C++ Tutor",
-  "version": "2.2.4",
+  "version": "2.2.7",
   "author": "Nexia",
   "license": "MIT",
   "main": "dist/main/main.js",
   "scripts": {
     "build": "tsc && node scripts/copy-assets.js",
     "start": "npm run build && electron .",
-    "dist": "npm run build && electron-builder --win",
-    "dist:installer": "npm run build && electron-builder --win --config.win.target=nsis",
-    "dev": "npm run build && electron ."
+    "dist": "npm run build && npm run build:helpers && electron-builder --win",
+    "dist:installer": "npm run build && npm run build:helpers && electron-builder --win --config.win.target=nsis",
+    "dev": "npm run build && electron .",
+    "build:helpers": "node scripts/build-extract-sdk.js"
   },
   "build": {
     "appId": "com.nexia.ide",
@@ -22,8 +23,10 @@
     "win": {
       "target": [
         {
-          "target": "dir",
-          "arch": ["x64"]
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "resources/icon.ico",
@@ -44,11 +47,16 @@
       "unpackDirName": "NexiaIDE-data"
     },
     "nsis": {
-      "oneClick": true,
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
       "perMachine": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Nexia IDE"
+      "shortcutName": "Nexia IDE",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "include": "build/installer.nsh",
+      "artifactName": "NexiaSetup-${version}.${ext}"
     },
     "files": [
       "dist/main/**/*",
@@ -63,6 +71,14 @@
       {
         "from": "resources",
         "to": "resources"
+      },
+      {
+        "from": "PackedFiles/vcredist_x86.exe",
+        "to": "vcredist_x86.exe"
+      },
+      {
+        "from": "dist/extract_sdk.exe",
+        "to": "extract_sdk.exe"
       }
     ],
     "asarUnpack": []
