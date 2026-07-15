@@ -95,7 +95,16 @@ export interface ProjectConfig {
     name: string;
     path: string;
     type: 'executable' | 'library' | 'dll';
-    template: 'empty' | 'hello-world' | 'xui-app' | 'xbla';
+    /**
+     * Which template the project was made from.
+     *
+     * 'dll' and 'static-lib' were missing here, so both library templates had to
+     * declare themselves `template: 'empty'` with an `as any` on the type beside
+     * it to compile — meaning every library project on disk claims to be an
+     * empty project. Nothing reads this field to decide behaviour today, which
+     * is the only reason that was survivable.
+     */
+    template: 'empty' | 'hello-world' | 'xui-app' | 'xbla' | 'dll' | 'static-lib';
     sourceFiles: string[];
     includeDirectories: string[];
     libraryDirectories: string[];
@@ -317,6 +326,11 @@ export const IPC = {
     LESSON_READ: 'lesson:read',
     LESSON_DELETE: 'lesson:delete',
     LESSON_GET_DIR: 'lesson:getDir',
+
+    // Learn panel search. Both run in main because the providers send no CORS
+    // headers, so a renderer request would be blocked by the page origin.
+    SEARCH_VIDEOS: 'search:videos',
+    SEARCH_WEB: 'search:web',
 } as const;
 
 // ── File Tree Types ──

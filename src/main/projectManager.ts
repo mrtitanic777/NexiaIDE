@@ -9,6 +9,32 @@ import { ProjectConfig, ProjectTemplate, FileNode } from '../shared/types';
 
 const PROJECT_FILE = 'nexia.json';
 
+/**
+ * Placeholder for the project's name in a template's file paths and contents.
+ *
+ * Visual Studio names a project's entry-point file after the project — the XDK
+ * wizard for a project called TEST emits stdafx.h, stdafx.cpp and TEST.cpp — so
+ * templates say `src/__PROJECT__.cpp` and this is substituted at creation.
+ *
+ * It is not `${name}`: template contents are backtick literals, so that spelling
+ * would be interpolated by TypeScript when this file is compiled rather than by
+ * create() when a project is made.
+ */
+const NAME_TOKEN = /__PROJECT__/g;
+
+/**
+ * Make a project name safe to use as a filename.
+ *
+ * Project names reach here straight from a text box, and this value becomes a
+ * path. Anything Windows forbids in a filename is replaced, and any path
+ * separator with it — "../../evil" as a project name must not write outside the
+ * project directory.
+ */
+function safeFileName(name: string): string {
+    const cleaned = name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '').trim();
+    return cleaned || 'Main';
+}
+
 // ── Precompiled Header Content ──
 
 const STDAFX_H = `#pragma once
@@ -48,6 +74,34 @@ const STDAFX_CPP = `/**
 `;
 
 // ── Template Source Files ──
+
+/**
+ * The Empty template's entry point.
+ *
+ * "Empty" used to mean stdafx.h and stdafx.cpp and nothing else, which is not an
+ * empty program — it is one with no main(), and it fails at link with an
+ * unresolved external before the user has typed anything. Visual Studio's own
+ * empty-ish templates all emit an entry point for this reason. This is the
+ * smallest thing that actually builds and runs.
+ */
+const EMPTY_MAIN = `/**
+ * __PROJECT__.cpp — application entry point.
+ */
+
+#include "stdafx.h"
+
+void __cdecl main()
+{
+    // TODO: your code here.
+    //
+    // main() must not return on the Xbox 360 — returning from it ends the
+    // title. Loop, or call XLaunchNewImage to hand off elsewhere.
+    for(;;)
+    {
+        Sleep(100);
+    }
+}
+`;
 
 const HELLO_MAIN = `/**
  * Xbox 360 Minecraft Spinning Block Demo
@@ -518,16 +572,17 @@ export class ProjectManager {
             {
                 id: 'empty',
                 name: 'Empty Project',
-                description: 'A blank Xbox 360 project with precompiled header only.',
+                description: 'A bare project: precompiled header and an empty main().',
                 icon: '📁',
                 files: [
                     { path: 'src/stdafx.h', content: STDAFX_H },
                     { path: 'src/stdafx.cpp', content: STDAFX_CPP },
+                    { path: 'src/__PROJECT__.cpp', content: EMPTY_MAIN },
                 ],
                 config: {
                     type: 'executable', template: 'empty',
-                    sourceFiles: ['src/stdafx.cpp'],
-                    defines: [],
+                    sourceFiles: ['src/stdafx.cpp', 'src/__PROJECT__.cpp'],
+                    defines: ['_XBOX'],
                 },
             },
             {
@@ -538,12 +593,12 @@ export class ProjectManager {
                 files: [
                     { path: 'src/stdafx.h', content: STDAFX_H },
                     { path: 'src/stdafx.cpp', content: STDAFX_CPP },
-                    { path: 'src/main.cpp', content: HELLO_MAIN },
+                    { path: 'src/__PROJECT__.cpp', content: HELLO_MAIN },
                     { path: 'Content/README.txt', content: 'Place dirt.png (or any block texture) in this folder.\nThe demo will use a procedural fallback if no texture is found.\n' },
                 ],
                 config: {
                     type: 'executable', template: 'hello-world',
-                    sourceFiles: ['src/stdafx.cpp', 'src/main.cpp'],
+                    sourceFiles: ['src/stdafx.cpp', 'src/__PROJECT__.cpp'],
                     defines: ['_XBOX'],
                 },
             },
@@ -555,11 +610,11 @@ export class ProjectManager {
                 files: [
                     { path: 'src/stdafx.h', content: STDAFX_H + '\n// XUI\n#include <xui.h>\n' },
                     { path: 'src/stdafx.cpp', content: STDAFX_CPP },
-                    { path: 'src/main.cpp', content: XUI_MAIN },
+                    { path: 'src/__PROJECT__.cpp', content: XUI_MAIN },
                 ],
                 config: {
                     type: 'executable', template: 'xui-app',
-                    sourceFiles: ['src/stdafx.cpp', 'src/main.cpp'],
+                    sourceFiles: ['src/stdafx.cpp', 'src/__PROJECT__.cpp'],
                     defines: ['_XBOX'],
                     libraries: ['xuiruntime.lib', 'xuirender.lib'],
                 },
@@ -572,11 +627,11 @@ export class ProjectManager {
                 files: [
                     { path: 'src/stdafx.h', content: STDAFX_H + '\n// Networking\n#include <xonline.h>\n' },
                     { path: 'src/stdafx.cpp', content: STDAFX_CPP },
-                    { path: 'src/main.cpp', content: XBLA_MAIN },
+                    { path: 'src/__PROJECT__.cpp', content: XBLA_MAIN },
                 ],
                 config: {
                     type: 'executable', template: 'xbla',
-                    sourceFiles: ['src/stdafx.cpp', 'src/main.cpp'],
+                    sourceFiles: ['src/stdafx.cpp', 'src/__PROJECT__.cpp'],
                     defines: ['_XBOX', 'XBLA_TITLE'],
                     libraries: ['xnet.lib', 'xonline.lib'],
                 },
@@ -589,7 +644,7 @@ export class ProjectManager {
                 files: [
                     { path: 'src/stdafx.h', content: STDAFX_H },
                     { path: 'src/stdafx.cpp', content: STDAFX_CPP },
-                    { path: 'src/dllmain.cpp', content:
+                    { path: 'src/__PROJECT__.cpp', content:
 `#include "stdafx.h"
 
 // ── DLL Export Macros ──
@@ -652,10 +707,16 @@ DLL_EXPORT void MyLibraryShutdown(void)
 ` },
                 ],
                 config: {
-                    type: 'dll' as any, template: 'empty',
-                    sourceFiles: ['src/stdafx.cpp', 'src/dllmain.cpp'],
+                    type: 'dll', template: 'dll',
+                    sourceFiles: ['src/stdafx.cpp', 'src/__PROJECT__.cpp'],
                     defines: ['_XBOX', 'BUILDING_DLL'],
-                    libraries: ['xam.lib'],
+                    // No xam.lib. There is no such import library in the XDK —
+                    // linking one made every DLL project fail with LNK1181
+                    // before a line of user code was written. It is also not
+                    // needed: xam.xex exports by ordinal only, which is why the
+                    // code below resolves XNotifyQueueUI through GetModuleHandle
+                    // and GetProcAddress at runtime instead of importing it.
+                    libraries: [],
                 },
             },
             {
@@ -666,7 +727,7 @@ DLL_EXPORT void MyLibraryShutdown(void)
                 files: [
                     { path: 'src/stdafx.h', content: STDAFX_H },
                     { path: 'src/stdafx.cpp', content: STDAFX_CPP },
-                    { path: 'include/mylib.h', content:
+                    { path: 'include/__PROJECT__.h', content:
 `#pragma once
 // ── MyLib Public Header ──
 // Include this header in projects that use this library.
@@ -683,9 +744,9 @@ int  MyLib_DoWork(const char* input, char* output, int outputSize);
 }
 #endif
 ` },
-                    { path: 'src/mylib.cpp', content:
+                    { path: 'src/__PROJECT__.cpp', content:
 `#include "stdafx.h"
-#include "../include/mylib.h"
+#include "../include/__PROJECT__.h"
 #include <string.h>
 
 int MyLib_Init(void)
@@ -711,8 +772,8 @@ int MyLib_DoWork(const char* input, char* output, int outputSize)
 ` },
                 ],
                 config: {
-                    type: 'library' as any, template: 'empty',
-                    sourceFiles: ['src/stdafx.cpp', 'src/mylib.cpp'],
+                    type: 'library', template: 'static-lib',
+                    sourceFiles: ['src/stdafx.cpp', 'src/__PROJECT__.cpp'],
                     defines: ['_XBOX'],
                     includeDirectories: ['include'],
                 },
@@ -753,14 +814,30 @@ int MyLib_DoWork(const char* input, char* output, int outputSize)
         fs.mkdirSync(projectDir, { recursive: true });
         fs.mkdirSync(path.join(projectDir, 'src'), { recursive: true });
         fs.mkdirSync(path.join(projectDir, 'include'), { recursive: true });
-        fs.mkdirSync(path.join(projectDir, 'assets'), { recursive: true });
+        // "Media", not "assets" — it is what the XDK calls this. Every sample in
+        // Source\Samples loads from a media\ folder, and XUI resource locators
+        // are literally "file://game:/media/...", so a project that named it
+        // anything else would be the odd one out on its own platform.
+        fs.mkdirSync(path.join(projectDir, 'Media'), { recursive: true });
         fs.mkdirSync(path.join(projectDir, 'out'), { recursive: true });
 
-        // Write template files
+        // Write template files, naming the entry point after the project the way
+        // Visual Studio does.
+        const fileName = safeFileName(name);
         for (const file of template.files) {
-            const filePath = path.join(projectDir, file.path);
-            fs.mkdirSync(path.dirname(filePath), { recursive: true });
-            fs.writeFileSync(filePath, file.content, 'utf-8');
+            const rel = file.path.replace(NAME_TOKEN, fileName);
+            const filePath = path.join(projectDir, rel);
+
+            // safeFileName strips separators, so a substituted path cannot climb
+            // out of projectDir. Templates are ours, but this is the line where a
+            // typo'd literal `..` in one would become an arbitrary file write.
+            const resolved = path.resolve(filePath);
+            if (!resolved.startsWith(path.resolve(projectDir) + path.sep)) {
+                throw new Error(`Template '${templateId}' tried to write outside the project: ${file.path}`);
+            }
+
+            fs.mkdirSync(path.dirname(resolved), { recursive: true });
+            fs.writeFileSync(resolved, file.content.replace(NAME_TOKEN, fileName), 'utf-8');
         }
 
         // Create project config
@@ -769,7 +846,7 @@ int MyLib_DoWork(const char* input, char* output, int outputSize)
             path: projectDir,
             type: template.config.type || 'executable',
             template: template.config.template || 'empty',
-            sourceFiles: template.config.sourceFiles || [],
+            sourceFiles: (template.config.sourceFiles || []).map(f => f.replace(NAME_TOKEN, fileName)),
             includeDirectories: ['include', 'src'],
             libraryDirectories: [],
             libraries: template.config.libraries || [],

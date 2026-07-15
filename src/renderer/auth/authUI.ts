@@ -25,8 +25,46 @@ let _onAdminStateChange: ((isAdmin: boolean) => void) | null = null;
 
 function $(id: string): HTMLElement { return document.getElementById(id)!; }
 
+/**
+ * One letter, not two. See userInitial() in app.ts — this is the same rule:
+ * two letters of a single username reads as initials of a first and last name.
+ * Array.from so an astral first character isn't split mid-surrogate-pair.
+ */
 function getInitials(user: NexiaUser): string {
-    return (user.username || user.email || '?').substring(0, 2).toUpperCase();
+    const source = (user.username || user.email || '').trim();
+    return (Array.from(source)[0] || '?').toUpperCase();
+}
+
+/**
+ * Where a user's picture comes from.
+ *
+ * This module can't see the IDE's settings, and a locally uploaded picture
+ * lives there — so app.ts injects the lookup rather than this reaching for it.
+ * The default is the account's own avatarUrl, which is what this did before any
+ * of it was configurable.
+ */
+let _avatarSrc: (user: NexiaUser) => string | null = (u) => u.avatarUrl || null;
+
+export function setAvatarResolver(fn: (user: NexiaUser) => string | null) {
+    _avatarSrc = fn;
+    updateAuthButton();
+}
+
+/** Re-render the auth button — call after the user's picture changes. */
+export function refreshAuthButton() {
+    updateAuthButton();
+}
+
+/** A user's avatar as HTML: their picture if they have one, else their initial. */
+function avatarMarkup(user: NexiaUser, cls: string): string {
+    const src = _avatarSrc(user);
+    const color = getRoleColor(user.role);
+    if (src) {
+        return `<div class="${cls}" style="background:${color};overflow:hidden;padding:0">
+            <img src="${escHtml(src)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block">
+        </div>`;
+    }
+    return `<div class="${cls}" style="background:${color}">${escHtml(getInitials(user))}</div>`;
 }
 
 function getRoleColor(role: string): string {
@@ -269,7 +307,7 @@ function createAuthButton(): HTMLElement {
 function updateAuthButtonContent(btn: HTMLElement) {
     const user = auth.getUser();
     if (user) {
-        btn.innerHTML = `<div class="auth-avatar" style="background:${getRoleColor(user.role)}">${getInitials(user)}</div>`;
+        btn.innerHTML = avatarMarkup(user, 'auth-avatar');
         btn.title = user.username + ' (' + user.role + ')';
     } else {
         btn.innerHTML = '<span class="auth-signin-label">Sign In</span>';
@@ -291,7 +329,7 @@ function toggleDropdown() {
     if (user) {
         _authDropdown.innerHTML = `
             <div class="auth-dropdown-header">
-                <div class="auth-avatar-lg" style="background:${getRoleColor(user.role)}">${getInitials(user)}</div>
+                ${avatarMarkup(user, 'auth-avatar-lg')}
                 <div>
                     <div class="auth-dropdown-name">${escHtml(user.username)}</div>
                     <div class="auth-dropdown-email">${escHtml(user.email)}</div>

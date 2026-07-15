@@ -86,6 +86,14 @@ let _subTab: 'users' | 'builder' | 'cloud' | 'releases' = 'builder';
 const CPP_KEYWORDS = new Set(['if','else','for','while','do','switch','case','break','continue','return','class','struct','public','private','protected','virtual','override','void','const','static','new','delete','nullptr','true','false','this','namespace','using','template','typename','typedef','enum','sizeof','auto','register','volatile','extern','inline','throw','try','catch','operator','friend','explicit','mutable','noexcept','constexpr','decltype']);
 const CPP_TYPES = new Set(['int','float','double','char','bool','long','short','unsigned','signed','DWORD','BYTE','WORD','HRESULT','BOOL','HANDLE','HWND','LPCSTR','LPSTR','LPCWSTR','LPWSTR','UINT','ULONG','LONG','SIZE_T','VOID','IDirect3D9','IDirect3DDevice9','D3DPRESENT_PARAMETERS','D3DFORMAT','D3DDEVTYPE','XINPUT_STATE','XINPUT_GAMEPAD','D3DCOLOR','D3DVECTOR','D3DMATRIX','D3DVIEWPORT9','D3DXMATRIX','D3DXVECTOR3','D3DXVECTOR4','D3DLOCKED_RECT','LPDIRECT3DTEXTURE9','LPDIRECT3DVERTEXBUFFER9','LPDIRECT3DINDEXBUFFER9']);
 
+/**
+ * First letter of a name, uppercased. One letter, not two — see userInitial()
+ * in app.ts. Array.from so an astral first character isn't cut in half.
+ */
+function userInitial(name: string | undefined): string {
+    return (Array.from((name || '').trim())[0] || '?').toUpperCase();
+}
+
 function escHtml(s: string): string {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -261,7 +269,7 @@ async function renderUsersTab(container: HTMLElement) {
         item.className = 'admin-user-item';
         const isCurrentUser = auth.getUser()?.id === user.id;
         item.innerHTML = `
-            <div class="admin-user-avatar" style="background:${user.role === 'admin' ? '#e5c07b' : '#4ec9b0'}">${(user.username || '?').substring(0, 2).toUpperCase()}</div>
+            <div class="admin-user-avatar" style="background:${user.role === 'admin' ? '#e5c07b' : '#4ec9b0'}">${escHtml(userInitial(user.username))}</div>
             <div class="admin-user-info">
                 <div class="admin-user-name">${escHtml(user.username)} ${isCurrentUser ? '<span style="color:var(--text-muted);font-size:10px">(you)</span>' : ''}</div>
                 <div class="admin-user-email">${escHtml(user.email)}</div>

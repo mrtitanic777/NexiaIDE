@@ -1063,76 +1063,6 @@ input, textarea, select { user-select: text; -webkit-user-select: text; }
 .tour-btn-dim:hover { color: var(--text); }
 .tour-btn:disabled { opacity: 0.3; cursor: default; }
 
-/* ═══════════════════════════════════════════
-   QUIZ SYSTEM
-   ═══════════════════════════════════════════ */
-#quiz-dialog .dialog-header { display: flex; justify-content: space-between; align-items: center; padding: 18px 24px; border-bottom: 1px solid var(--border); }
-#quiz-dialog .dialog-header h2 { margin: 0; font-size: 16px; color: var(--text-bright); font-weight: 600; }
-#quiz-progress { font-size: 12px; color: var(--text-dim); font-weight: 600; }
-#quiz-content { padding: 18px 24px; overflow: hidden; }
-#quiz-content * { box-sizing: border-box; }
-.quiz-question { font-size: 14px; color: var(--text); line-height: 1.6; margin-bottom: 14px; font-weight: 500; }
-.quiz-option {
-    display: block; text-align: left; padding: 10px 14px; margin: 6px 0;
-    border: 1px solid var(--border); background: transparent; color: var(--text);
-    font-size: 13px; cursor: pointer; border-radius: var(--radius-sm); transition: background 0.06s;
-    box-sizing: border-box; -webkit-appearance: none; width: calc(100% - 2px);
-}
-.quiz-option:hover { background: var(--bg-hover); border-color: var(--border-light); }
-.quiz-option.selected { background: #04395e; border-color: #007acc; }
-.quiz-option.correct { border-color: #22c55e; background: rgba(34,197,94,0.08); color: #6ee7b7; }
-.quiz-option.incorrect { border-color: var(--red); background: rgba(241,76,76,0.06); color: #fca5a5; }
-.quiz-option.correct::before { content: '✓ '; font-weight: 700; }
-.quiz-option.incorrect::before { content: '✗ '; font-weight: 700; }
-.quiz-fill-input {
-    width: 100%; padding: 8px 12px; border: 1px solid var(--border);
-    background: var(--bg-input); color: var(--text); font-size: 14px;
-    font-family: var(--mono); box-sizing: border-box; outline: none; border-radius: var(--radius-sm);
-}
-.quiz-fill-input:focus { border-color: #007acc; }
-.quiz-feedback { margin-top: 10px; padding: 8px 12px; font-size: 12px; line-height: 1.5; border-radius: var(--radius-md); }
-.quiz-feedback.hidden { display: none; }
-.quiz-feedback.correct { background: rgba(34,197,94,0.06); border: 1px solid rgba(34,197,94,0.2); color: #6ee7b7; }
-.quiz-feedback.incorrect { background: rgba(241,76,76,0.05); border: 1px solid rgba(241,76,76,0.15); color: #fca5a5; }
-.quiz-ref { margin-top: 8px; padding: 8px 12px; background: var(--bg-dark); border: 1px solid var(--border); font-size: 11px; color: var(--text-dim); line-height: 1.5; border-radius: var(--radius-md); }
-.quiz-ref.hidden { display: none; }
-#quiz-dialog .dialog-buttons { padding: 14px 24px; border-top: 1px solid var(--border); margin-top: 0; }
-
-/* ═══════════════════════════════════════════
-   FLASHCARDS
-   ═══════════════════════════════════════════ */
-#flashcard-container { padding: 18px 24px; display: flex; flex-direction: column; align-items: center; }
-.flashcard { width: 360px; height: 200px; perspective: 1000px; cursor: pointer; margin-bottom: 12px; }
-.flashcard-inner { position: relative; width: 100%; height: 100%; transition: transform 0.5s; transform-style: preserve-3d; }
-.flashcard.flipped .flashcard-inner { transform: rotateY(180deg); }
-.flashcard-front, .flashcard-back {
-    position: absolute; inset: 0; backface-visibility: hidden;
-    display: flex; align-items: center; justify-content: center;
-    padding: 24px; text-align: center; font-size: 14px; line-height: 1.6;
-}
-.flashcard-front { background: var(--bg-dark); border: 1px solid var(--border); color: var(--text); font-weight: 500; border-radius: var(--radius-lg); }
-.flashcard-back { background: var(--bg-dark); border: 1px solid var(--green-dim); color: var(--green-bright); transform: rotateY(180deg); font-size: 13px; border-radius: var(--radius-lg); }
-.fc-hint { font-size: 11px; color: var(--text-dim); text-align: center; margin: 0; }
-#flashcard-dialog .dialog-header { display: flex; justify-content: space-between; align-items: center; padding: 18px 24px; border-bottom: 1px solid var(--border); }
-#flashcard-dialog { padding: 0; }
-#flashcard-dialog .dialog-header h2 { margin: 0; font-size: 16px; color: var(--text-bright); font-weight: 600; }
-#flashcard-dialog .dialog-buttons { padding: 14px 24px; border-top: 1px solid var(--border); margin-top: 0; }
-#fc-progress { font-size: 12px; color: var(--text-dim); font-weight: 600; }
-
-/* ═══════════════════════════════════════════
-   STUDY NOTES
-   ═══════════════════════════════════════════ */
-.notes-editor {
-    width: 100%; height: 300px; padding: 14px; margin: 0;
-    background: var(--bg-dark); border: 1px solid var(--border);
-    color: var(--text); font-family: var(--mono); font-size: 13px;
-    line-height: 1.6; resize: vertical; box-sizing: border-box; outline: none; border-radius: var(--radius-md);
-}
-.notes-editor:focus { border-color: #007acc; }
-#notes-dialog .dialog-header { padding: 18px 24px; border-bottom: 1px solid var(--border); }
-#notes-dialog .dialog-header h2 { margin: 0; font-size: 16px; color: var(--text-bright); font-weight: 600; }
-#notes-dialog .notes-editor { margin: 18px 24px 0; width: calc(100% - 48px); }
-#notes-dialog .dialog-buttons { padding: 14px 24px; border-top: 1px solid var(--border); margin-top: 18px; }
 
 /* ═══════════════════════════════════════════
    GIT / SOURCE CONTROL PANEL
@@ -1520,23 +1450,6 @@ input, textarea, select { user-select: text; -webkit-user-select: text; }
 .code-helper-btn-dim { background: transparent; color: var(--text-dim); border-color: var(--border); }
 .code-helper-btn-dim:hover { background: var(--bg-hover); color: var(--text); }
 
-/* ═══════════════════════════════════════════
-   STUDY PANEL
-   ═══════════════════════════════════════════ */
-.study-section { padding: 10px 12px; }
-.study-btn {
-    display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; margin-bottom: 6px;
-    border: 1px solid var(--border); background: transparent; color: var(--text);
-    font-size: 12px; cursor: pointer; text-align: left; border-radius: var(--radius-md); transition: background 0.06s;
-}
-.study-btn:hover { background: var(--bg-hover); }
-.study-btn-icon { font-size: 16px; flex-shrink: 0; }
-.study-btn-label { font-weight: 600; }
-.study-btn-desc { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
-.study-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 0 12px 12px; }
-.study-stat { padding: 8px; background: var(--bg-dark); border: 1px solid var(--border); text-align: center; border-radius: var(--radius-md); }
-.study-stat-num { font-size: 18px; font-weight: 700; color: var(--green); }
-.study-stat-label { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
 
 /* ═══════════════════════════════════════════
    COMMUNITY / DISCORD PANEL
@@ -1780,9 +1693,6 @@ body:not(.fancy) .toggle-slider, body:not(.fancy) .toggle-slider::before {
 .search-panel-inner { padding: 8px 12px; }
 .search-input-gap { margin-top: 4px; }
 .search-include-input { font-size: 11px; }
-
-/* Quiz fill submit spacing */
-.quiz-fill-submit { margin-top: 10px; }
 
 /* Hidden utility */
 .hidden { display: none !important; }
@@ -3260,10 +3170,6 @@ body:not(.fancy) .toggle-slider, body:not(.fancy) .toggle-slider::before {
 .learn-action-btn.learn-action-primary { border-color:var(--green-dim, #2e8a76); color:var(--green, #4ec9b0); background:var(--green-bg, rgba(78,201,176,0.08)); }
 .learn-action-btn.learn-action-primary:hover { background:var(--green-bg-hover, rgba(78,201,176,0.14)); }
 
-.learn-mode-picker { display:flex; gap:3px; padding:4px 0; }
-.learn-mode-btn { flex:1; padding:5px 4px; border:1px solid var(--border); border-radius:5px; background:transparent; color:var(--text-dim); font-size:9px; font-family:inherit; cursor:pointer; text-align:center; transition:all .12s; }
-.learn-mode-btn:hover { background:var(--bg-hover); color:var(--text); }
-.learn-mode-btn.active { border-color:var(--accent, #4ec9b0); color:var(--accent, #4ec9b0); background:rgba(78,201,176,0.08); }
 
 /* ═══════════════════════════════════════════
    LIGHT MODE THEME

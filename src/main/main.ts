@@ -15,6 +15,7 @@ import { ExtensionManager } from './extensions';
 import { ProjectManager } from './projectManager';
 import { DiscordFeed } from './discord';
 import { parseSolution, parseVsProject, importVsProject } from './vsImporter';
+import * as searchService from './searchService';
 import { IPC } from '../shared/types';
 
 // ── Services ──
@@ -31,7 +32,12 @@ let mainWindow: BrowserWindow | null = null;
 // ── App Settings ──
 const SETTINGS_PATH = path.join(app.getPath('userData'), 'settings.json');
 const RECENT_PATH = path.join(app.getPath('userData'), 'recent.json');
-const PROJECTS_DIR = path.join(app.getPath('documents'), 'Nexia IDE', 'Projects');
+// Documents\NexiaIDE\Projects — no space, matching the product name everywhere
+// else. Projects made before this went to "Nexia IDE\Projects"; they are not
+// moved. Nothing needs them to be: open() takes a project's path from wherever
+// it finds nexia.json rather than the path recorded inside it, so an old
+// project opens from its old folder indefinitely.
+const PROJECTS_DIR = path.join(app.getPath('documents'), 'NexiaIDE', 'Projects');
 
 // Ensure Projects folder exists
 function ensureProjectsDir() {
@@ -1091,6 +1097,19 @@ function registerIpcHandlers() {
         if (!fs.existsSync(lessonsDir)) fs.mkdirSync(lessonsDir, { recursive: true });
         return lessonsDir;
     });
+
+    // Learn panel search. The renderer owns settings, so it hands the key down
+    // per call and this stays stateless — nothing to keep in sync, and no key
+    // sitting in main's memory for the life of the process.
+    ipcMain.handle(IPC.SEARCH_VIDEOS, async (_e, opts: { query: string; apiKey: string }) =>
+        searchService.searchVideos(opts?.query || '', opts?.apiKey || ''));
+
+    ipcMain.handle(IPC.SEARCH_WEB, async (_e, opts: { query: string; provider: 'google' | 'brave'; apiKey: string; engineId?: string }) =>
+        searchService.searchWeb(opts?.query || '', {
+            provider: opts?.provider || 'google',
+            apiKey: opts?.apiKey || '',
+            engineId: opts?.engineId,
+        }));
 
     ipcMain.handle(IPC.LESSON_LIST, async () => {
         if (!fs.existsSync(lessonsDir)) fs.mkdirSync(lessonsDir, { recursive: true });

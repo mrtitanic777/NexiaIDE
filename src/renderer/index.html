@@ -116,7 +116,6 @@
                 <button class="sidebar-tab" data-panel="devkit" title="Devkit">📡</button>
                 <button class="sidebar-tab" data-panel="emulator" title="Emulator">🎮</button>
                 <button class="sidebar-tab" data-panel="learn" title="Learn">🎓</button>
-                <button class="sidebar-tab" data-panel="study" title="Study & Quizzes">📝</button>
                 <button class="sidebar-tab" data-panel="community" title="Community">💬</button>
             </div>
             <div id="sidebar-content">
@@ -288,10 +287,6 @@
                 <div id="panel-learn" class="sidebar-panel">
                     <div class="panel-header">LEARN</div>
                     <div id="learn-panel" class="panel-body"></div>
-                </div>
-                <div id="panel-study" class="sidebar-panel">
-                    <div class="panel-header">STUDY</div>
-                    <div id="study-panel" class="panel-body"></div>
                 </div>
                 <div id="panel-community" class="sidebar-panel">
                     <div class="panel-header">COMMUNITY</div>
@@ -888,7 +883,7 @@
 
     <div id="new-project-overlay" class="overlay hidden">
         <div id="new-project-dialog">
-            <h2>New Xbox 360 Project</h2>
+            <h2>New Project</h2>
             <div class="dialog-field">
                 <label>Project Name:</label>
                 <input type="text" id="np-name" placeholder="MyGame">
@@ -1071,79 +1066,6 @@
         <span class="inline-tip-text" id="tip-text"></span>
         <button class="inline-tip-dismiss" id="tip-dismiss" title="Dismiss">✕</button>
         <button class="inline-tip-more" id="tip-more" title="Show in Tips panel">More →</button>
-    </div>
-
-    <!-- Quiz Dialog -->
-    <div id="quiz-overlay" class="overlay hidden">
-        <div id="quiz-dialog" class="dialog-box dialog-md">
-            <div class="dialog-header">
-                <h2 id="quiz-title">📝 Quiz</h2>
-                <span id="quiz-progress">1 / 10</span>
-            </div>
-            <div id="quiz-content">
-                <div id="quiz-question" class="quiz-question"></div>
-                <div id="quiz-mode-mc" class="quiz-mode">
-                    <div id="quiz-options"></div>
-                </div>
-                <div id="quiz-mode-fill" class="quiz-mode hidden">
-                    <input type="text" id="quiz-fill-input" class="quiz-fill-input" placeholder="Type your answer..." autocomplete="off">
-                    <button id="quiz-fill-submit" class="ob-btn-primary quiz-fill-submit">Submit Answer</button>
-                </div>
-                <div id="quiz-feedback" class="quiz-feedback hidden"></div>
-                <div id="quiz-ref" class="quiz-ref hidden">
-                    <strong>📖 Reference:</strong> <span id="quiz-ref-text"></span>
-                </div>
-            </div>
-            <div class="dialog-buttons">
-                <button id="quiz-ref-btn" class="setup-btn-secondary">📖 Show Reference</button>
-                <button id="quiz-note-btn" class="setup-btn-secondary">📌 Save as Flashcard</button>
-                <button id="quiz-next" class="setup-btn-primary">Next →</button>
-                <button id="quiz-close" class="setup-btn-secondary">Close</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Flashcard Viewer -->
-    <div id="flashcard-overlay" class="overlay hidden">
-        <div id="flashcard-dialog" class="dialog-box dialog-sm">
-            <div class="dialog-header">
-                <h2>🃏 Flashcards</h2>
-                <span id="fc-progress">1 / 0</span>
-            </div>
-            <div id="flashcard-container">
-                <div id="flashcard" class="flashcard" tabindex="0">
-                    <div class="flashcard-inner">
-                        <div class="flashcard-front">
-                            <div id="fc-front-text">Question</div>
-                        </div>
-                        <div class="flashcard-back">
-                            <div id="fc-back-text">Answer</div>
-                        </div>
-                    </div>
-                </div>
-                <p class="fc-hint">Click card to flip · Arrow keys to navigate</p>
-            </div>
-            <div class="dialog-buttons">
-                <button id="fc-prev" class="setup-btn-secondary">← Prev</button>
-                <button id="fc-flip" class="setup-btn">Flip</button>
-                <button id="fc-next" class="setup-btn-secondary">Next →</button>
-                <button id="fc-close" class="setup-btn-primary">Done</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Study Notes Editor -->
-    <div id="notes-overlay" class="overlay hidden">
-        <div id="notes-dialog" class="dialog-box dialog-lg">
-            <div class="dialog-header">
-                <h2>📓 Study Notes</h2>
-            </div>
-            <textarea id="notes-editor" class="notes-editor" placeholder="Write your study notes here...&#10;&#10;These are saved with your project."></textarea>
-            <div class="dialog-buttons">
-                <button id="notes-export" class="setup-btn-secondary">Export as .txt</button>
-                <button id="notes-save" class="setup-btn-primary">Save & Close</button>
-            </div>
-        </div>
     </div>
 
     <!-- Code-Along Helper (floating widget) -->

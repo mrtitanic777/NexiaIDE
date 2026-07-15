@@ -132,8 +132,6 @@ function saveProfile() {
 let currentInlineTip: any = null;
 let tipCooldown = false;
 
-// ── Study System State ──
-// Study state moved to panels/studyPanel.ts
 let currentCodeHint: any = null;
 let codeHelperDismissed: Set<string> = new Set();
 let lastHintLine = -1;
@@ -161,6 +159,32 @@ interface UserSettings {
     aiAutoErrors: boolean;
     aiInlineSuggest: boolean;
     aiFileContext: boolean;
+    // Learn panel search. Empty until the user supplies a key; the Videos and
+    // Web tabs show setup instructions rather than an error in that state.
+    youtubeApiKey: string;
+    searchProvider: 'google' | 'brave';
+    searchApiKey: string;
+    /** Google Programmable Search only — its "cx". Unused by Brave. */
+    searchEngineId: string;
+    /**
+     * The user's profile picture, as a data: URI. Empty means fall back to
+     * their account's avatarUrl, then to their initial.
+     *
+     * Stored inline rather than as a path because a path breaks the moment the
+     * file is moved or deleted, and the picture is small enough after
+     * downscaling that the settings file stays a reasonable size.
+     */
+    avatarDataUrl: string;
+    /**
+     * Custom project-template icons, keyed by template id, as data: URIs.
+     *
+     * The built-in icons are emoji, which is fine as a default and useless if
+     * you want the real thing — an isometric Minecraft block for the spinning
+     * block demo is a picture, not a character in a font. A template id absent
+     * from here falls back to its emoji, so this only ever holds what the user
+     * actually replaced.
+     */
+    templateIcons: Record<string, string>;
     // Color mode
     colorMode: string;
     /** Structural skin: 'default' | 'blade' | 'devkit' | 'phosphor' */
@@ -293,6 +317,12 @@ const DEFAULT_SETTINGS: UserSettings = {
     aiAutoErrors: false,
     aiInlineSuggest: false,
     aiFileContext: true,
+    youtubeApiKey: '',
+    searchProvider: 'google',
+    searchApiKey: '',
+    searchEngineId: '',
+    avatarDataUrl: '',
+    templateIcons: {},
     colorMode: 'dark',
     skin: 'default',
     syntaxColors: { ...DEFAULT_SYNTAX_COLORS },
@@ -350,6 +380,10 @@ function loadUserSettings() {
                 ...DEFAULT_SETTINGS,
                 ...data,
                 syntaxColors: { ...DEFAULT_SYNTAX_COLORS, ...(data.syntaxColors || {}) },
+                // Fresh object for the same reason as syntaxColors: without it,
+                // setting a custom icon would write into DEFAULT_SETTINGS itself
+                // and "reset to defaults" would hand back the customised copy.
+                templateIcons: { ...(data.templateIcons || {}) },
             };
             // Migrate old default colors to new darker palette
             const OLD_DEFAULTS: Record<string, string> = {
@@ -674,13 +708,16 @@ function showAccountPrompt(onResolved?: () => void) {
     }
     function onKey(e: KeyboardEvent) { if (e.key === 'Escape') done(); }
 
-    const initials = (last?.username || '?').substring(0, 2).toUpperCase();
+    const src = userAvatarSrc(last as any);
+    const face = src
+        ? `<img src="${escapeHtml(src)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block;border-radius:50%">`
+        : escapeHtml(userInitial(last as any));
 
     modal.innerHTML = `
         <div style="padding:22px 22px 4px">
             ${last ? `
                 <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
-                    <div style="width:40px;height:40px;border-radius:50%;background:var(--green);color:#06120d;display:grid;place-items:center;font-weight:700;font-size:14px">${escapeHtml(initials)}</div>
+                    <div style="width:40px;height:40px;border-radius:50%;background:var(--green);color:#06120d;display:grid;place-items:center;font-weight:700;font-size:14px;overflow:hidden">${face}</div>
                     <div>
                         <div style="font-size:15px;font-weight:600;color:var(--text)">Welcome back, ${escapeHtml(last.username)}</div>
                         <div style="font-size:12px;color:var(--text-muted)">Last signed in as ${escapeHtml(last.email || '')}</div>
@@ -774,11 +811,18 @@ function showUpdateModal(u: any, currentVersion: string) {
 
     modal.innerHTML = `
         <div style="padding:20px 22px 0">
-            <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+            <div style="display:flex;align-items:center;gap:10px">
                 <span style="font-size:20px">🚀</span>
                 <div style="font-size:16px;font-weight:600;color:var(--text)">Nexia IDE v${escapeHtml(displayVersion(u.version))} has been released!</div>
             </div>
-            <div style="font-size:12.5px;color:var(--text-dim);margin-left:30px">${escapeHtml(u.title || '')}</div>
+            <!--
+                The manifest's title field used to render here as a grey
+                subtitle. In practice it restated the headline directly above it
+                - "Nexia IDE v3.1 has been released!" over "Nexia IDE 3.1" - so
+                it was a line of noise between the reader and the actual changes.
+                The notes below say what happened; the heading says which
+                version. Nothing left for a subtitle to add.
+            -->
         </div>
         <div style="padding:16px 22px">
             <div style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px">What's new</div>
@@ -1150,7 +1194,6 @@ $$('.sidebar-tab').forEach(tab => {
         activePanel = panel;
         $(`panel-${panel}`).classList.add('active');
         // Refresh dynamic panels
-        if (panel === 'study') renderStudyPanel();
         if (panel === 'learn') renderLearnPanel();
         if (panel === 'extensions') renderExtensionsPanel();
         if (panel === 'git') { renderGitPanel(); checkGitConfiguration(); }
@@ -2095,30 +2138,131 @@ $('welcome-open').addEventListener('click', () => openProject());
 //  NEW PROJECT DIALOG
 // ══════════════════════════════════════
 $('welcome-new').addEventListener('click', showNewProjectDialog);
-let selectedTemplate = 'hello-world';
+
+/**
+ * Empty until the user picks one. This used to default to 'hello-world', so the
+ * dialog opened with the Minecraft demo already highlighted and Create would
+ * make one for anybody who didn't notice they were choosing.
+ */
+let selectedTemplate = '';
 
 async function showNewProjectDialog() {
-    const templates = await ipcRenderer.invoke(IPC.PROJECT_GET_TEMPLATES);
-    const container = $('np-templates');
-    container.innerHTML = '';
+    // Reset per open: the variable outlives the dialog, so without this a
+    // second visit would arrive pre-selected with the first visit's choice.
+    selectedTemplate = '';
     // Pre-fill location with default projects directory
     const locInput = $('np-location') as HTMLInputElement;
     if (!locInput.value && defaultProjectsDir) locInput.value = defaultProjectsDir;
+
+    await renderTemplateCards();
+
+    $('new-project-overlay').classList.remove('hidden');
+    // Blur Monaco editor so it doesn't capture keystrokes, then focus the name input
+    if (editor) editor.getContainerDomNode()?.querySelector('textarea')?.blur();
+    setTimeout(() => ($('np-name') as HTMLInputElement).focus(), 100);
+}
+
+/**
+ * Draw the template cards.
+ *
+ * Separate from showNewProjectDialog so that changing an icon can redraw them
+ * without resetting the user's selection or re-focusing the name box — the
+ * dialog is already open at that point.
+ */
+async function renderTemplateCards() {
+    const templates = await ipcRenderer.invoke(IPC.PROJECT_GET_TEMPLATES);
+    const container = $('np-templates');
+    container.innerHTML = '';
     for (const t of templates) {
         const card = document.createElement('div');
         card.className = `template-card${t.id === selectedTemplate ? ' selected' : ''}`;
-        card.innerHTML = `<span class="template-icon">${t.icon}</span><div class="template-info"><h4>${t.name}</h4><p>${t.description}</p></div>`;
+        card.innerHTML = `${templateIconHtml(t)}<div class="template-info"><h4>${escapeHtml(t.name)}</h4><p>${escapeHtml(t.description)}</p></div>`;
         card.addEventListener('click', () => {
             container.querySelectorAll('.template-card').forEach(c => c.classList.remove('selected'));
             card.classList.add('selected');
             selectedTemplate = t.id;
         });
+        // Right-click to replace the emoji with a real picture. A context menu
+        // rather than a visible button: changing an icon is a rare, deliberate
+        // act, and a pencil on every card would be noise on the one screen
+        // where the user is trying to read the templates.
+        card.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            showTemplateIconMenu(t.id, e.clientX, e.clientY);
+        });
         container.appendChild(card);
     }
-    $('new-project-overlay').classList.remove('hidden');
-    // Blur Monaco editor so it doesn't capture keystrokes, then focus the name input
-    if (editor) editor.getContainerDomNode()?.querySelector('textarea')?.blur();
-    setTimeout(() => ($('np-name') as HTMLInputElement).focus(), 100);
+}
+
+/**
+ * A template's icon: the user's picture if they set one, else the built-in
+ * emoji. `image-rendering:pixelated` because the obvious thing to drop in here
+ * is game art — a 16px Minecraft block scaled up should stay crisp rather than
+ * be smoothed into mush.
+ */
+function templateIconHtml(t: { id: string; icon: string }): string {
+    const custom = userSettings.templateIcons?.[t.id];
+    if (custom) {
+        return `<span class="template-icon"><img src="${escapeHtml(custom)}" alt=""
+            style="width:26px;height:26px;object-fit:contain;display:block;image-rendering:pixelated"></span>`;
+    }
+    return `<span class="template-icon">${escapeHtml(t.icon)}</span>`;
+}
+
+/** Right-click menu on a template card: set or clear its picture. */
+function showTemplateIconMenu(templateId: string, x: number, y: number) {
+    document.getElementById('tpl-icon-menu')?.remove();
+
+    const menu = document.createElement('div');
+    menu.id = 'tpl-icon-menu';
+    menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;z-index:10000;background:var(--bg-panel);
+        border:1px solid var(--border);border-radius:6px;padding:4px;box-shadow:0 6px 20px rgba(0,0,0,.4);
+        font-size:12px;min-width:150px`;
+
+    const hasCustom = !!userSettings.templateIcons?.[templateId];
+    const add = (label: string, fn: () => void) => {
+        const item = document.createElement('div');
+        item.textContent = label;
+        item.style.cssText = 'padding:6px 10px;border-radius:4px;cursor:pointer;color:var(--text)';
+        item.addEventListener('mouseenter', () => item.style.background = 'var(--bg-hover)');
+        item.addEventListener('mouseleave', () => item.style.background = '');
+        item.addEventListener('click', () => { menu.remove(); fn(); });
+        menu.appendChild(item);
+    };
+
+    add(hasCustom ? 'Replace icon…' : 'Upload icon…', async () => {
+        // 128px: these render at 26px, and even a high-DPI display doesn't need
+        // more than this. It keeps the settings file small when every template
+        // has one.
+        const data = await pickImageAsDataUrl(128);
+        if (!data) return;
+        if (!userSettings.templateIcons) userSettings.templateIcons = {};
+        userSettings.templateIcons[templateId] = data;
+        saveUserSettings();
+        renderTemplateCards();
+    });
+    if (hasCustom) {
+        add('Reset to default', () => {
+            delete userSettings.templateIcons[templateId];
+            saveUserSettings();
+            renderTemplateCards();
+        });
+    }
+
+    document.body.appendChild(menu);
+
+    // Nudge back on screen if it opened near an edge.
+    const r = menu.getBoundingClientRect();
+    if (r.right > window.innerWidth) menu.style.left = `${window.innerWidth - r.width - 6}px`;
+    if (r.bottom > window.innerHeight) menu.style.top = `${window.innerHeight - r.height - 6}px`;
+
+    const close = (e: MouseEvent) => {
+        if (!menu.contains(e.target as Node)) { menu.remove(); document.removeEventListener('mousedown', close); }
+    };
+    // Deferred: this same click is still propagating, and binding it now would
+    // close the menu before it is ever seen.
+    setTimeout(() => document.addEventListener('mousedown', close), 0);
 }
 
 $('np-cancel').addEventListener('click', () => $('new-project-overlay').classList.add('hidden'));
@@ -2131,6 +2275,9 @@ $('np-create').addEventListener('click', async () => {
     const location = ($('np-location') as HTMLInputElement).value.trim();
     if (!name) { alert('Enter a project name.'); return; }
     if (!location) { alert('Choose a location.'); return; }
+    // No template defaults to selected any more, so this is now reachable —
+    // without it the main process throws "Template '' not found".
+    if (!selectedTemplate) { alert('Choose a template.'); return; }
     try {
         const project = await ipcRenderer.invoke(IPC.PROJECT_NEW, name, location, selectedTemplate);
         currentProject = project;
@@ -2501,9 +2648,8 @@ function updateTitlebarUser() {
     if (!el) return;
     const user = authService.getUser();
     if (user) {
-        const initials = (user.username || '?').substring(0, 2).toUpperCase();
         const color = user.role === 'admin' ? '#e5c07b' : '#4ec9b0';
-        el.innerHTML = `<div class="tu-avatar" style="background:${color}">${initials}</div><span class="tu-name">${user.username}</span>`;
+        el.innerHTML = `${avatarHtml(user, 'tu-avatar', color)}<span class="tu-name">${escapeHtml(user.username)}</span>`;
     } else {
         el.innerHTML = '<span style="font-size:11px;color:var(--text-muted)">Not signed in</span>';
     }
@@ -2719,12 +2865,11 @@ function toggleUserPanel() {
     panel.id = 'user-panel';
 
     if (user) {
-        const initials = (user.username || '?').substring(0, 2).toUpperCase();
         const color = user.role === 'admin' ? '#e5c07b' : '#4ec9b0';
         panel.innerHTML = `
             <div class="up-header">
                 <div class="up-user-row">
-                    <div class="auth-avatar-lg" style="background:${color}">${initials}</div>
+                    ${avatarHtml(user, 'auth-avatar-lg', color)}
                     <div>
                         <div class="up-name">${user.username}</div>
                         <div class="up-email">${user.email}</div>
@@ -2919,11 +3064,10 @@ async function renderDevPanelUsers(container: HTMLElement) {
     for (const user of users) {
         const isMe = authService.getUser()?.id === user.id;
         const color = user.role === 'admin' ? '#e5c07b' : '#4ec9b0';
-        const initials = (user.username || '?').substring(0, 2).toUpperCase();
         const item = document.createElement('div');
         item.className = 'dp-user-item';
         item.innerHTML = `
-            <div class="dp-user-avatar" style="background:${color}">${initials}</div>
+            ${avatarHtml(user, 'dp-user-avatar', color)}
             <div class="dp-user-info">
                 <div class="dp-user-name">${user.username} ${isMe ? '<span class="dp-you">(you)</span>' : ''}</div>
                 <div class="dp-user-email">${user.email}</div>
@@ -3048,7 +3192,6 @@ function getDefaultLayoutConfig(): UILayoutConfig {
                 { id: 'devkit', icon: '📡', title: 'Devkit', visible: true },
                 { id: 'emulator', icon: '🎮', title: 'Emulator', visible: true },
                 { id: 'learn', icon: '🎓', title: 'Learn', visible: true },
-                { id: 'study', icon: '📝', title: 'Study & Quizzes', visible: true },
                 { id: 'community', icon: '💬', title: 'Community', visible: true },
             ],
             defaultWidth: 260,
@@ -3576,7 +3719,12 @@ function applyUILayout(config: UILayoutConfig) {
 
 let _settingsPanelOpen = false;
 
-function showSettingsPanel() {
+/**
+ * @param section which nav item to open on. Defaults to Appearance; the Learn
+ *        panel passes 'learn' so its "enter a key" button lands on the field
+ *        it's asking for rather than dumping the user at the front of Settings.
+ */
+function showSettingsPanel(section = 'appearance') {
     if (_settingsPanelOpen) { closeSettingsPanel(); return; }
     _settingsPanelOpen = true;
 
@@ -3601,11 +3749,12 @@ function showSettingsPanel() {
         </style>
         <div style="padding:0 16px 16px;font-size:14px;font-weight:600;color:var(--text);">⚙ Settings</div>
         <div class="sp-nav" id="sp-nav">
-            <button class="sp-nav-item active" data-section="appearance">🎨 Appearance</button>
-            <button class="sp-nav-item" data-section="layout">📐 Layout</button>
-            <button class="sp-nav-item" data-section="ai">🤖 AI Assistant</button>
-            <button class="sp-nav-item" data-section="accounts">🔗 Accounts</button>
-            <button class="sp-nav-item" data-section="advanced">⚡ Advanced</button>
+            <button class="sp-nav-item${section === 'appearance' ? ' active' : ''}" data-section="appearance">🎨 Appearance</button>
+            <button class="sp-nav-item${section === 'layout' ? ' active' : ''}" data-section="layout">📐 Layout</button>
+            <button class="sp-nav-item${section === 'ai' ? ' active' : ''}" data-section="ai">🤖 AI Assistant</button>
+            <button class="sp-nav-item${section === 'learn' ? ' active' : ''}" data-section="learn">🎓 Learn</button>
+            <button class="sp-nav-item${section === 'accounts' ? ' active' : ''}" data-section="accounts">🔗 Accounts</button>
+            <button class="sp-nav-item${section === 'advanced' ? ' active' : ''}" data-section="advanced">⚡ Advanced</button>
         </div>
         <div style="flex:1;"></div>
         <div id="sp-version" style="padding:8px 16px;font-size:10.5px;color:var(--text-muted);user-select:text;"></div>
@@ -3675,10 +3824,7 @@ function showSettingsPanel() {
     };
     document.addEventListener('keydown', escHandler);
 
-    // Render default section
-    // Appearance is the first tab now that Editor is gone — opening on a section
-    // that no longer exists would render an empty panel.
-    renderSettingsSection(content, 'appearance');
+    renderSettingsSection(content, section);
 }
 
 function closeSettingsPanel() {
@@ -3708,6 +3854,17 @@ function saveSettingsFromUI() {
     if (inlineSuggest) userSettings.aiInlineSuggest = inlineSuggest.checked;
     const fileCtx = get('sp-ai-filectx') as HTMLInputElement;
     if (fileCtx) userSettings.aiFileContext = fileCtx.checked;
+
+    // Learn tab. Same contract as the AI fields above: each is read only when
+    // its element is on screen, so switching sections doesn't blank a key that
+    // isn't currently rendered.
+    const ytKey = get('sp-yt-key') as HTMLInputElement;
+    if (ytKey) userSettings.youtubeApiKey = ytKey.value.trim();
+    const webKey = get('sp-web-key') as HTMLInputElement;
+    if (webKey) userSettings.searchApiKey = webKey.value.trim();
+    const webCx = get('sp-web-cx') as HTMLInputElement;
+    if (webCx) userSettings.searchEngineId = webCx.value.trim();
+
     saveUserSettings();
 }
 
@@ -4030,13 +4187,117 @@ function renderSettingsSection(container: HTMLElement, section: string) {
             });
             break;
 
-        case 'accounts':
+        // Keys for the Learn panel's Videos and Web tabs. They're here rather
+        // than in the panel itself because a key is a setting, not a search —
+        // you enter it once and never look at it again.
+        case 'learn': {
+            const webProvider = s.searchProvider || 'google';
             container.innerHTML = `
-                <h2 style="font-size:18px;font-weight:600;color:var(--text);margin:0 0 20px;">Connected Accounts</h2>
+                <h2 style="font-size:18px;font-weight:600;color:var(--text);margin:0 0 20px;">Learn</h2>
+                <div style="font-size:11.5px;color:var(--text-muted);line-height:1.6;margin-bottom:6px;">
+                    The Videos and Web tabs search through the providers' own APIs, which means each needs a key.
+                    Both have free tiers. The curriculum, lessons and progress tracking work without either.
+                </div>
+
+                ${sectionTitle('YouTube — Videos tab')}
+                <div style="display:flex;gap:8px;margin-bottom:6px;">
+                    <input type="password" id="sp-yt-key" value="${escapeHtml(s.youtubeApiKey || '')}" placeholder="YouTube Data API v3 key" style="flex:1;padding:6px 10px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:13px;">
+                    <button id="sp-yt-toggle" style="padding:6px 12px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;">Show</button>
+                </div>
+                <div style="font-size:10.5px;color:var(--text-muted);margin-bottom:4px;">
+                    Free tier is 100 searches a day. <a href="#" id="sp-yt-link" style="color:var(--accent);text-decoration:none;">Get a key →</a>
+                </div>
+
+                ${sectionTitle('Web search — Web tab')}
+                <select id="sp-web-provider" style="width:100%;padding:6px 10px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:13px;margin-bottom:8px;">
+                    <option value="google" ${webProvider === 'google' ? 'selected' : ''}>Google Programmable Search</option>
+                    <option value="brave" ${webProvider === 'brave' ? 'selected' : ''}>Brave Search</option>
+                </select>
+                <div style="display:flex;gap:8px;margin-bottom:8px;">
+                    <input type="password" id="sp-web-key" value="${escapeHtml(s.searchApiKey || '')}" placeholder="${webProvider === 'brave' ? 'Brave Search API key' : 'Google API key'}" style="flex:1;padding:6px 10px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:13px;">
+                    <button id="sp-web-toggle" style="padding:6px 12px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;">Show</button>
+                </div>
+                <div id="sp-web-cx-row" style="margin-bottom:6px;${webProvider === 'google' ? '' : 'display:none;'}">
+                    <input type="text" id="sp-web-cx" value="${escapeHtml(s.searchEngineId || '')}" placeholder="Search engine ID (cx)" style="width:100%;padding:6px 10px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);font-size:13px;box-sizing:border-box;">
+                </div>
+                <div style="font-size:10.5px;color:var(--text-muted);">
+                    <span id="sp-web-note">${webProvider === 'brave' ? 'Free tier is 2,000 searches a month.' : 'Free tier is 100 searches a day, and Google needs both values.'}</span>
+                    <a href="#" id="sp-web-link" style="color:var(--accent);text-decoration:none;">Get a key →</a>
+                </div>
+            `;
+
+            const reveal = (inputId: string, btnId: string) => {
+                const inp = container.querySelector('#' + inputId) as HTMLInputElement;
+                const btn = container.querySelector('#' + btnId) as HTMLButtonElement;
+                btn.addEventListener('click', () => {
+                    const hidden = inp.type === 'password';
+                    inp.type = hidden ? 'text' : 'password';
+                    btn.textContent = hidden ? 'Hide' : 'Show';
+                });
+            };
+            reveal('sp-yt-key', 'sp-yt-toggle');
+            reveal('sp-web-key', 'sp-web-toggle');
+
+            container.querySelector('#sp-yt-link')!.addEventListener('click', (e) => {
+                e.preventDefault();
+                shell.openExternal('https://console.cloud.google.com/apis/library/youtube.googleapis.com');
+            });
+            container.querySelector('#sp-web-link')!.addEventListener('click', (e) => {
+                e.preventDefault();
+                shell.openExternal((userSettings.searchProvider || 'google') === 'brave'
+                    ? 'https://brave.com/search/api/'
+                    : 'https://programmablesearchengine.google.com/');
+            });
+
+            // Switching provider re-renders: the engine-id field and the quota
+            // note only make sense for one of the two.
+            container.querySelector('#sp-web-provider')!.addEventListener('change', (e) => {
+                userSettings.searchProvider = (e.target as HTMLSelectElement).value as 'google' | 'brave';
+                saveUserSettings();
+                renderSettingsSection(container, 'learn');
+            });
+            break;
+        }
+
+        case 'accounts': {
+            const me = authService.getUser();
+            const meColor = me?.role === 'admin' ? '#e5c07b' : '#4ec9b0';
+            container.innerHTML = `
+                <h2 style="font-size:18px;font-weight:600;color:var(--text);margin:0 0 20px;">Account</h2>
+                ${sectionTitle('Profile picture')}
+                <div style="display:flex;align-items:center;gap:14px;margin-bottom:6px;">
+                    <div id="sp-avatar-preview" style="flex:none;">${avatarHtml(me, 'auth-avatar-lg', meColor)}</div>
+                    <div style="display:flex;flex-direction:column;gap:6px;">
+                        <div style="display:flex;gap:6px;">
+                            <button id="sp-avatar-pick" style="padding:6px 12px;background:var(--bg-input);border:1px solid var(--border);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;">Upload picture…</button>
+                            <button id="sp-avatar-clear" style="padding:6px 12px;background:var(--bg-input);border:1px solid var(--border);color:var(--text-dim);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;${s.avatarDataUrl ? '' : 'display:none;'}">Remove</button>
+                        </div>
+                        <div style="font-size:10.5px;color:var(--text-muted);">
+                            ${s.avatarDataUrl ? 'Your uploaded picture. Stored on this PC.' : 'No picture — your initial is shown instead.'}
+                        </div>
+                    </div>
+                </div>
+                ${sectionTitle('Connected accounts')}
                 <div style="display:flex;flex-direction:column;gap:10px;" id="sp-accounts"></div>
             `;
             renderAccountRows(container.querySelector('#sp-accounts')!);
+
+            container.querySelector('#sp-avatar-pick')!.addEventListener('click', async () => {
+                const data = await pickImageAsDataUrl(256);
+                if (!data) return;
+                userSettings.avatarDataUrl = data;
+                saveUserSettings();
+                refreshAvatars();
+                renderSettingsSection(container, 'accounts');
+            });
+            container.querySelector('#sp-avatar-clear')!.addEventListener('click', () => {
+                userSettings.avatarDataUrl = '';
+                saveUserSettings();
+                refreshAvatars();
+                renderSettingsSection(container, 'accounts');
+            });
             break;
+        }
 
         case 'advanced':
             container.innerHTML = `
@@ -4201,10 +4462,18 @@ function updateOnboardingAuthStatus(user: any) {
     const skipEl = document.getElementById('ob-skip-auth');
     if (statusEl && user) {
         statusEl.style.display = 'block';
-        const initials = (user.username || user.email || '?').substring(0, 2).toUpperCase();
         const color = user.role === 'admin' ? '#e5c07b' : '#4ec9b0';
-        document.getElementById('ob-auth-avatar')!.style.background = color;
-        document.getElementById('ob-auth-avatar')!.textContent = initials;
+        const ob = document.getElementById('ob-auth-avatar')!;
+        ob.style.background = color;
+        // innerHTML, not textContent: this one may now hold an <img>.
+        const obSrc = userAvatarSrc(user);
+        if (obSrc) {
+            ob.style.overflow = 'hidden';
+            ob.innerHTML = `<img src="${escapeHtml(obSrc)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block">`;
+        } else {
+            ob.style.overflow = '';
+            ob.textContent = userInitial(user);
+        }
         document.getElementById('ob-auth-name')!.textContent = user.username;
         document.getElementById('ob-auth-role')!.textContent = user.role.toUpperCase();
         document.getElementById('ob-auth-role')!.style.color = color;
@@ -4312,19 +4581,13 @@ const TOUR_STEPS: TourStep[] = [
     },
     {
         target: '[data-panel="learn"]',
-        icon: '🎓', title: 'Learn & Curriculum',
-        body: 'A guided curriculum that walks you through Xbox 360 development step by step — from initializing Direct3D to building full games. Track your progress, earn achievements, and unlock new challenges.',
+        icon: '🎓', title: 'Learn',
+        body: 'Three ways to learn, in one place. Learn is a guided curriculum through Xbox 360 development — Direct3D through to full games — tracking your progress as you go. Videos searches YouTube for tutorials, and Web searches the internet, both without leaving the IDE.',
         position: 'right',
         setup: () => {
             const learnTab = document.querySelector('[data-panel="learn"]') as HTMLElement;
             if (learnTab) learnTab.click();
         },
-    },
-    {
-        target: '[data-panel="study"]',
-        icon: '📝', title: 'Study & Quizzes',
-        body: 'Test your knowledge with quizzes on Xbox 360 development topics. Review flashcards, track mastery levels, and reinforce what you\'ve learned from the curriculum.',
-        position: 'right',
     },
     {
         target: '[data-panel="community"]',
@@ -4894,11 +5157,52 @@ function openLessonViewer(moduleId: string, lessonId: string) {
     render();
 }
 
-async function renderLearnPanel() {
-    const panel = $('learn-panel');
-    if (!panel) return;
-    panel.innerHTML = '';
+type LearnTab = 'learn' | 'videos' | 'web';
+let learnTab: LearnTab = 'learn';
 
+const LEARN_TABS: { id: LearnTab; label: string; icon: string }[] = [
+    { id: 'learn', label: 'Learn', icon: '🎓' },
+    { id: 'videos', label: 'Videos', icon: '▶' },
+    { id: 'web', label: 'Web', icon: '🌐' },
+];
+
+/**
+ * The Learn panel: one place to learn, split three ways.
+ *
+ * These used to be a single scroll with the old Study panel beside it, and the
+ * two overlapped enough that neither was the obvious place to look. Now the
+ * curriculum, the videos, and the web each get a tab, and progress is recorded
+ * against the learning profile from wherever it happens rather than from a
+ * separate panel of quizzes.
+ */
+async function renderLearnPanel() {
+    const root = $('learn-panel');
+    if (!root) return;
+    root.innerHTML = '';
+
+    const strip = document.createElement('div');
+    strip.style.cssText = 'display:flex;gap:2px;padding:2px;margin-bottom:6px;background:var(--bg-dark);border-radius:6px';
+    for (const t of LEARN_TABS) {
+        const b = document.createElement('button');
+        const on = learnTab === t.id;
+        b.style.cssText = `flex:1;padding:5px 4px;border:none;border-radius:4px;cursor:pointer;font-size:10.5px;
+            font-weight:${on ? '600' : '500'};background:${on ? 'var(--bg-panel)' : 'transparent'};
+            color:${on ? 'var(--text)' : 'var(--text-muted)'}`;
+        b.textContent = `${t.icon} ${t.label}`;
+        b.addEventListener('click', () => { learnTab = t.id; renderLearnPanel(); });
+        strip.appendChild(b);
+    }
+    root.appendChild(strip);
+
+    const body = document.createElement('div');
+    root.appendChild(body);
+
+    if (learnTab === 'videos') { renderVideosSection(body); return; }
+    if (learnTab === 'web') { renderWebSection(body); return; }
+    await renderLearnHome(body);
+}
+
+async function renderLearnHome(panel: HTMLElement) {
     // ── Progress Summary ──
     const totalAch = learning.ACHIEVEMENTS.length;
     const earnedAch = userProfile.completedAchievements.length;
@@ -5065,26 +5369,9 @@ async function renderLearnPanel() {
     skillDiv.innerHTML = '<div class="learn-section-title">SKILL LEVEL</div><div style="padding:4px 4px;font-size:11px;color:var(--text)">' + (levelIcons[userProfile.skillLevel] || '\ud83c\udf31') + ' ' + userProfile.skillLevel.charAt(0).toUpperCase() + userProfile.skillLevel.slice(1) + '</div>';
     panel.appendChild(skillDiv);
 
-    // ── Color Mode ──
-    const themeDiv = document.createElement('div');
-    themeDiv.className = 'learn-section';
-    const currentMode = document.documentElement.dataset.colorMode || 'dark';
-    themeDiv.innerHTML = `
-        <div class="learn-section-title">APPEARANCE</div>
-        <div class="learn-mode-picker">
-            <button class="learn-mode-btn ${currentMode === 'light' ? 'active' : ''}" data-mode="light">☀ Light</button>
-            <button class="learn-mode-btn ${currentMode === 'dark' ? 'active' : ''}" data-mode="dark">🌙 Dark</button>
-            <button class="learn-mode-btn ${currentMode === 'auto' ? 'active' : ''}" data-mode="auto">💻 Auto</button>
-        </div>`;
-    themeDiv.addEventListener('click', (e) => {
-        const btn = (e.target as HTMLElement).closest('.learn-mode-btn') as HTMLElement;
-        if (!btn) return;
-        const mode = btn.dataset.mode!;
-        applyColorMode(mode);
-        themeDiv.querySelectorAll('.learn-mode-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-    });
-    panel.appendChild(themeDiv);
+    // The light/dark picker that used to sit here is gone. Settings → Appearance
+    // has owned colour mode since v3.0, and two controls for one setting is how
+    // you get a panel that disagrees with itself.
 }
 
 function createLessonCard(lesson: { id: string; title: string; desc: string; difficulty: string; available: boolean; longDesc?: string; duration?: string; topics?: string[] }): HTMLElement {
@@ -5272,11 +5559,128 @@ document.addEventListener('keydown', resetIdleTipTimer);
 document.addEventListener('click', resetIdleTipTimer);
 
 // ══════════════════════════════════════
-//  STUDY SYSTEM — Extracted to panels/studyPanel.ts
+//  IMAGE PICKING
 // ══════════════════════════════════════
-const { initStudy, loadFlashcards, initStudyButtons, startQuiz,
-        showFlashcards, renderStudyPanel } = require('./panels/studyPanel');
-// initStudy + initStudyButtons called in init() after aiService loads
+
+/**
+ * Let the user pick an image file and return it as a downscaled data: URI.
+ *
+ * Downscaling is the whole point. These images are stored inline in the
+ * settings JSON, and a phone photo dropped in as a profile picture is several
+ * megabytes of base64 that gets parsed on every launch, forever. Re-encoding to
+ * a bounded PNG makes the stored size a function of `maxPx` rather than of
+ * whatever the user happened to pick.
+ *
+ * Returns null if the user cancels or the file isn't a decodable image.
+ */
+async function pickImageAsDataUrl(maxPx = 256): Promise<string | null> {
+    const file: string | null = await ipcRenderer.invoke(IPC.FILE_SELECT_FILE, [
+        { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'] },
+    ]);
+    if (!file) return null;
+
+    let raw: string;
+    try {
+        const buf = nodeFs.readFileSync(file);
+        const ext = nodePath.extname(file).toLowerCase();
+        const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg'
+            : ext === '.gif' ? 'image/gif'
+            : ext === '.bmp' ? 'image/bmp'
+            : ext === '.webp' ? 'image/webp'
+            : 'image/png';
+        raw = `data:${mime};base64,${buf.toString('base64')}`;
+    } catch (err: any) {
+        alert(`Couldn't read that file: ${err.message}`);
+        return null;
+    }
+
+    return await new Promise<string | null>((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+            // Only shrink. Scaling a 32px icon up to 256 would just blur it.
+            const scale = Math.min(1, maxPx / Math.max(img.width, img.height));
+            const w = Math.max(1, Math.round(img.width * scale));
+            const h = Math.max(1, Math.round(img.height * scale));
+
+            const canvas = document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return resolve(raw);
+            ctx.drawImage(img, 0, 0, w, h);
+            // PNG throughout: these are icons and avatars, often with
+            // transparency, and JPEG would fill it with black.
+            try { resolve(canvas.toDataURL('image/png')); } catch { resolve(raw); }
+        };
+        img.onerror = () => { alert("That file isn't an image the IDE can read."); resolve(null); };
+        img.src = raw;
+    });
+}
+
+// ══════════════════════════════════════
+//  AVATARS
+// ══════════════════════════════════════
+
+/**
+ * The letter shown when there's no picture.
+ *
+ * One letter, not two. Five call sites each had their own
+ * `.substring(0, 2).toUpperCase()`, so "mrtitanic777" rendered as "MR" — two
+ * letters of a username reads as somebody's initials, which is what a two-letter
+ * avatar means everywhere else. A single letter is unambiguous.
+ */
+function userInitial(user: { username?: string; email?: string } | null): string {
+    const source = (user?.username || user?.email || '').trim();
+    // Not [0] — an emoji or any astral character is a surrogate pair, and half
+    // of one renders as a replacement box.
+    return (Array.from(source)[0] || '?').toUpperCase();
+}
+
+/**
+ * The image to show for a user, or null to fall back to their initial.
+ *
+ * A locally uploaded picture wins over the server's: it is the one the user
+ * chose in this copy of the IDE, and it should not be silently overridden by
+ * whatever their account or linked Discord happens to carry.
+ */
+function userAvatarSrc(user: { avatarUrl?: string } | null): string | null {
+    return userSettings.avatarDataUrl || user?.avatarUrl || null;
+}
+
+/**
+ * Render an avatar as HTML: a picture if there is one, else a single letter.
+ * `cls` is the existing class at each site (tu-avatar, dp-user-avatar, …) so
+ * each keeps its own size and shape.
+ */
+function avatarHtml(user: { username?: string; email?: string; avatarUrl?: string } | null,
+                    cls: string, color: string): string {
+    const src = userAvatarSrc(user);
+    if (src) {
+        // object-fit:cover so a non-square upload fills the circle instead of
+        // being squashed into it.
+        return `<div class="${cls}" style="background:${color};overflow:hidden;padding:0">
+            <img src="${escapeHtml(src)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block">
+        </div>`;
+    }
+    return `<div class="${cls}" style="background:${color}">${escapeHtml(userInitial(user))}</div>`;
+}
+
+/**
+ * Redraw every avatar that's currently on screen.
+ *
+ * The titlebar is the only one that persists — the user panel and the dev panel
+ * rebuild themselves each time they open, so they pick the new picture up on
+ * their own.
+ */
+function refreshAvatars() {
+    try { updateTitlebarUser(); } catch {}
+    try { authUI.refreshAuthButton(); } catch {}
+}
+
+// ══════════════════════════════════════
+//  LEARN — VIDEOS & WEB — panels/learnDiscover.ts
+// ══════════════════════════════════════
+const { initDiscover, renderVideosSection, renderWebSection } = require('./panels/learnDiscover');
 
 // ══════════════════════════════════════
 //  COMMUNITY PANEL — Extracted to panels/communityPanel.ts
@@ -5512,23 +5916,12 @@ const { aiComplete, sendAIMessage, switchToAIPanel,
         clearAIChat, renderMarkdown,
         tutorOnLessonComplete, tutorOnQuizFail, tutorOnSessionReturn, tutorOnBuildError } = aiService;
 
-// Wire study panel deps (needs tutorOnQuizFail from aiService above)
-initStudy({
-    $, appendOutput,
-    getCurrentProject: () => currentProject,
-    getUserSettings: () => userSettings,
-    renderLearnPanel,
-    tutorOnQuizFail,
-    // Feed quiz results into the adaptive profile and push to the cloud (debounced).
-    recordLearning: (conceptId: string, type: 'lesson' | 'exercise' | 'quiz' | 'chat', successful: boolean) => {
-        try {
-            learningProfile.recordInteraction(conceptId, type, successful, 0);
-            learningProfile.save();
-            scheduleProgressSync();
-        } catch {}
-    },
+initDiscover({
+    getSettings: () => userSettings,
+    openExternal: (url: string) => { try { shell.openExternal(url); } catch {} },
+    openSettings: () => showSettingsPanel('learn'),
+    escapeHtml,
 });
-initStudyButtons();
 
 // ── AI Configuration Check ──
 let _aiToastShown = false;
@@ -5650,7 +6043,6 @@ async function init() {
 
     loadUserSettings();
     loadProfile();
-    loadFlashcards();
 
     // Wire shared app context for extracted modules
     appCtx.userSettings = userSettings;
@@ -5703,7 +6095,6 @@ async function init() {
     setBuildStatus('ready');
     renderLearnPanel();
     renderTipsPanel();
-    renderStudyPanel();
     renderGitPanel();
     initVisualizerPanel();
     initAI();
@@ -5711,6 +6102,10 @@ async function init() {
     // ── Auth initialization ──
     // Silently load stored token and validate
     const authUser = await authService.init();
+    // Teach authUI where a locally uploaded picture lives. It can't read
+    // settings itself, and its default only knows about the account's own
+    // avatarUrl.
+    try { authUI.setAvatarResolver((u: any) => userAvatarSrc(u)); } catch {}
     // Show username in titlebar
     updateTitlebarUser();
     // Pull cloud settings + learning progress if logged in
