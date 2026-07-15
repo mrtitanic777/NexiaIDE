@@ -230,6 +230,15 @@ VIAddVersionKey "OriginalFilename" "NexiaSetup.exe"
 
 Section "Install"
 
+  ; Only our own status lines in the details view.
+  ;
+  ; The default (both) prints a line per file for every File/RMDir/CopyFiles
+  ; operation, and this installer extracts, deletes and moves thousands of files
+  ; -- node_modules alone is ~1,800. That buries the six messages that actually
+  ; say what is happening under a wall of paths nobody reads. DetailPrint still
+  ; shows under textonly; only the automatic per-file lines are suppressed.
+  SetDetailsPrint textonly
+
   ; Flags the updater passes. NSIS suppresses the wizard pages under /S on its
   ; own, but these have to be read explicitly:
   ;   --force-run  relaunch the IDE when the install finishes. Without it a
@@ -488,6 +497,13 @@ Section "Install"
   ; not guaranteed — if they differ, Rename fails and we fall back to copying.
   !insertmacro Log "Installing Nexia IDE..."
   DetailPrint "Installing Nexia IDE..."
+
+  ; Deleting the previous version is thousands of files and takes a moment, so
+  ; say so — under SetDetailsPrint textonly it is otherwise a silent stall.
+  ${If} ${FileExists} "$INSTDIR\resources\app\*.*"
+  ${OrIf} ${FileExists} "$INSTDIR\resources\app.asar"
+    DetailPrint "Removing the previous version..."
+  ${EndIf}
 
   ; Remove a packed app from an earlier electron-builder install.
   ;
