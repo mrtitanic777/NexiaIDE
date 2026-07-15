@@ -198,6 +198,69 @@ const DEFAULT_SYNTAX_COLORS: SyntaxColors = {
     preprocessor: '#c586c0',
 };
 
+/**
+ * Syntax colour schemes.
+ *
+ * Ports of palettes people already know, rather than colours invented here — a
+ * scheme is a set of hue relationships that took someone a long time to balance,
+ * and picking eight colours freehand reliably produces something that looks
+ * wrong without being able to say why.
+ *
+ * These are the editor's tokens only; the IDE's own colours are PRESETS above,
+ * and the two apply independently.
+ */
+const SYNTAX_PRESETS: Record<string, { label: string; colors: SyntaxColors }> = {
+    'vs-dark': {
+        label: 'VS Dark',
+        colors: { comment: '#6a9955', keyword: '#569cd6', string: '#ce9178', number: '#b5cea8',
+                  type: '#4ec9b0', function: '#dcdcaa', variable: '#9cdcfe', preprocessor: '#c586c0' },
+    },
+    'vs2010': {
+        label: 'Visual Studio 2010',
+        // What the XDK's own IDE looked like: green comments, blue keywords,
+        // dark red strings, everything else plain.
+        colors: { comment: '#57a64a', keyword: '#569cd6', string: '#d69d85', number: '#b5cea8',
+                  type: '#4ec9b0', function: '#dcdcaa', variable: '#dcdcdc', preprocessor: '#9b9b9b' },
+    },
+    monokai: {
+        label: 'Monokai',
+        colors: { comment: '#75715e', keyword: '#f92672', string: '#e6db74', number: '#ae81ff',
+                  type: '#66d9ef', function: '#a6e22e', variable: '#f8f8f2', preprocessor: '#f92672' },
+    },
+    dracula: {
+        label: 'Dracula',
+        colors: { comment: '#6272a4', keyword: '#ff79c6', string: '#f1fa8c', number: '#bd93f9',
+                  type: '#8be9fd', function: '#50fa7b', variable: '#f8f8f2', preprocessor: '#ff79c6' },
+    },
+    nord: {
+        label: 'Nord',
+        colors: { comment: '#616e88', keyword: '#81a1c1', string: '#a3be8c', number: '#b48ead',
+                  type: '#8fbcbb', function: '#88c0d0', variable: '#d8dee9', preprocessor: '#5e81ac' },
+    },
+    'solarized-dark': {
+        label: 'Solarized Dark',
+        colors: { comment: '#586e75', keyword: '#859900', string: '#2aa198', number: '#d33682',
+                  type: '#b58900', function: '#268bd2', variable: '#839496', preprocessor: '#cb4b16' },
+    },
+    'gruvbox': {
+        label: 'Gruvbox',
+        colors: { comment: '#928374', keyword: '#fb4934', string: '#b8bb26', number: '#d3869b',
+                  type: '#fabd2f', function: '#8ec07c', variable: '#ebdbb2', preprocessor: '#fe8019' },
+    },
+    'high-contrast': {
+        label: 'High Contrast',
+        // For projectors, poor screens, and eyes that have had enough.
+        colors: { comment: '#7ca668', keyword: '#569cd6', string: '#ce9178', number: '#b5cea8',
+                  type: '#4ec9b0', function: '#dcdcaa', variable: '#ffffff', preprocessor: '#c586c0' },
+    },
+    phosphor: {
+        label: 'Phosphor',
+        // Pairs with the Phosphor skin: one hue, brightness does the work.
+        colors: { comment: '#2a7a2a', keyword: '#33ff33', string: '#88ff88', number: '#55ff55',
+                  type: '#66ff66', function: '#aaffaa', variable: '#33ff33', preprocessor: '#1f5f1f' },
+    },
+};
+
 /** Human labels for the settings UI, in the order they're shown. */
 const SYNTAX_COLOR_LABELS: [keyof SyntaxColors, string, string][] = [
     ['comment',      'Comments',      '// like this'],
@@ -3711,6 +3774,17 @@ function renderSettingsSection(container: HTMLElement, section: string) {
                 </div>
                 ${sectionTitle('Code Colors')}
                 <div style="font-size:11px;color:var(--text-muted);margin:0 0 10px;">How your code is syntax-highlighted. Changes apply as you pick.</div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;">
+                    ${Object.entries(SYNTAX_PRESETS).map(([id, p]) => `
+                        <button class="syntax-preset-btn" data-syntax-preset="${id}" title="${escapeHtml(p.label)}"
+                            style="display:flex;align-items:center;gap:6px;padding:5px 9px;border:1px solid var(--border);background:var(--bg-input);color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:11.5px;">
+                            <span style="display:flex;border-radius:2px;overflow:hidden;border:1px solid rgba(0,0,0,0.4)">
+                                ${(['keyword', 'string', 'comment', 'function'] as (keyof SyntaxColors)[])
+                                    .map(k => `<span style="width:7px;height:12px;background:${p.colors[k]}"></span>`).join('')}
+                            </span>
+                            ${escapeHtml(p.label)}
+                        </button>`).join('')}
+                </div>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;">
                     ${SYNTAX_COLOR_LABELS.map(([key, label, sample]) => row(
                         `${label} <span style="color:var(--text-muted);font-family:var(--font-mono);font-size:10.5px;">${escapeHtml(sample)}</span>`,
@@ -3764,6 +3838,21 @@ function renderSettingsSection(container: HTMLElement, section: string) {
                 defineEditorTheme();
                 saveUserSettings();
                 renderSettingsSection(container, 'appearance');
+            });
+            // Syntax schemes. Copied, not referenced — assigning the preset
+            // object itself would alias it, so editing one colour afterwards
+            // would rewrite the preset for the rest of the session.
+            container.querySelectorAll('.syntax-preset-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const id = (btn as HTMLElement).dataset.syntaxPreset;
+                    if (!id || !SYNTAX_PRESETS[id]) return;
+                    userSettings.syntaxColors = { ...SYNTAX_PRESETS[id].colors };
+                    defineEditorTheme();
+                    saveUserSettings();
+                    // Re-render so the pickers below show the scheme's values
+                    // rather than the ones they had before.
+                    renderSettingsSection(container, 'appearance');
+                });
             });
             // Skins — apply the structural skin plus its tuned palette
             container.querySelectorAll('.skin-btn').forEach(btn => {
