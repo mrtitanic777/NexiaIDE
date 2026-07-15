@@ -465,10 +465,15 @@ function parseVcxproj(projPath: string, sdkRoot?: string): ParsedVsProject {
                 // Release_LTCG but NOT Profile. Say so per configuration rather
                 // than leaving that build to fail at link time with no clue why.
                 if (ref.exists && cfg !== IMPORT_CONFIGURATION) {
+                    // Says what is true — the library isn't there — without
+                    // predicting a failure. A project can reference ATG in its
+                    // solution and never call into it, in which case the
+                    // configuration links perfectly well without the lib.
+                    // MinecraftMenu does exactly that: Profile builds fine.
                     warnings.push(
-                        `${cfg}: no built "${ref.name}" library was found, so this configuration won't link ` +
-                        `until you build ${ref.name} for ${cfg} in Visual Studio. ` +
-                        `${IMPORT_CONFIGURATION} is unaffected.`);
+                        `${cfg}: your SDK has no ${cfg} build of "${ref.name}", so it isn't linked for that ` +
+                        `configuration. Only a problem if your code calls into ${ref.name} — build it for ` +
+                        `${cfg} in Visual Studio if so.`);
                 }
                 continue;
             }

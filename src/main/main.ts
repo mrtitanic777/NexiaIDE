@@ -722,7 +722,30 @@ function registerIpcHandlers() {
                             : 'That solution has no C/C++ (.vcxproj/.vcproj) projects in it.',
                     };
                 }
-                return { success: true, kind: 'sln', solutionPath: picked, name: info.name, projects: info.projects };
+                // Don't offer the SDK's own projects as things to import.
+                //
+                // A solution that uses the ATG framework lists it as a project,
+                // but it lives in the Xbox 360 SDK and ships prebuilt — picking
+                // it would import Microsoft's 112 sources instead of the user's
+                // app. Importing the app already links it (see projectReferences
+                // in the importer), so listing it here just implies you have to
+                // choose both, which is the opposite of what happens.
+                //
+                // If that leaves exactly one project, the renderer skips the
+                // picker entirely — there is nothing to choose.
+                const sdkRoot = toolchain.getPaths()?.root;
+                const importable = sdkRoot
+                    ? info.projects.filter(p => !path.resolve(p.path).toLowerCase()
+                        .startsWith(path.resolve(sdkRoot).toLowerCase() + path.sep))
+                    : info.projects;
+
+                return {
+                    success: true, kind: 'sln', solutionPath: picked, name: info.name,
+                    projects: importable.length ? importable : info.projects,
+                    // Kept for the header: "MinecraftMenu.sln · 2 projects" should
+                    // still describe the solution, not what survived the filter.
+                    totalProjects: info.projects.length,
+                };
             }
             return {
                 success: true, kind: 'proj', solutionPath: null,

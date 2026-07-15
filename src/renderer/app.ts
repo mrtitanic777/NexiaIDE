@@ -513,7 +513,7 @@ async function importFromVisualStudio() {
         modal.innerHTML = `
             <div style="padding:18px 20px 12px;border-bottom:1px solid var(--border)">
                 <div style="font-size:15px;font-weight:600;color:var(--text)">Import from Visual Studio</div>
-                <div style="font-size:11.5px;color:var(--text-muted);margin-top:3px">${escapeHtml(picked.kind === 'sln' ? picked.name + '.sln' : selected.name)}${projects.length > 1 ? ` · ${projects.length} projects` : ''}</div>
+                <div style="font-size:11.5px;color:var(--text-muted);margin-top:3px">${escapeHtml(picked.kind === 'sln' ? picked.name + '.sln' : selected.name)}${(picked.totalProjects || projects.length) > 1 ? ` · ${picked.totalProjects || projects.length} projects` : ''}</div>
             </div>
             <div style="padding:16px 20px;overflow-y:auto;flex:1">
                 ${projects.length > 1 ? `
@@ -544,7 +544,7 @@ async function importFromVisualStudio() {
                             }).join('')}
                         </div>` : ''}
                     ${p.warnings.length ? `
-                        <div style="font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--yellow);margin:14px 0 6px">Not imported (${p.warnings.length})</div>
+                        <div style="font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--yellow);margin:14px 0 6px">Worth knowing (${p.warnings.length})</div>
                         <div style="background:rgba(204,167,0,0.07);border:1px solid rgba(204,167,0,0.25);border-radius:var(--radius-md);padding:10px 12px;max-height:120px;overflow-y:auto">
                             ${p.warnings.map((w: string) => `<div style="font-size:11px;color:var(--text-dim);line-height:1.6">• ${escapeHtml(w)}</div>`).join('')}
                         </div>` : ''}
