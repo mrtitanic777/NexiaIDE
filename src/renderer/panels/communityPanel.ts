@@ -65,6 +65,7 @@ export function getDiscordAuthUser() {
 
 let discordFeedLoading = false;
 let currentThreadView: string | null = null;
+let threadPollInFlight = false;
 let threadPollInterval: ReturnType<typeof setInterval> | null = null;
 let feedPollInterval: ReturnType<typeof setInterval> | null = null;
 let lastSeenMessageId: string | null = null;
@@ -82,6 +83,11 @@ function startThreadPoll(threadId: string) {
 
 async function pollThreadMessages(threadId: string) {
     if (currentThreadView !== threadId || !lastSeenMessageId) return;
+    // Skip if a previous poll's awaited round-trip hasn't resolved yet. Without
+    // this, a fetch slower than the 5s interval lets ticks overlap and append the
+    // same messages twice.
+    if (threadPollInFlight) return;
+    threadPollInFlight = true;
 
     try {
         const newMsgs = await _ipcRenderer.invoke(_IPC.DISCORD_GET_NEW_MESSAGES, threadId, lastSeenMessageId);
@@ -104,7 +110,9 @@ async function pollThreadMessages(threadId: string) {
             // Show "new messages" indicator
             showNewMessagesBadge(container, newMsgs.length);
         }
-    } catch {}
+    } catch {} finally {
+        threadPollInFlight = false;
+    }
 }
 
 function showNewMessagesBadge(container: HTMLElement, count: number) {
@@ -161,6 +169,12 @@ export async function refreshCommunityView() {
     const panel = _$('community-panel');
     if (!panel) return;
 
+    // The panel is about to be re-rendered (or torn down to a not-logged-in
+    // state). Stop the feed poll so its 30s interval doesn't keep firing
+    // IPC/Discord calls for the app's lifetime against a destroyed feed element.
+    // loadDiscordFeed() restarts it when the feed view is shown again.
+    stopFeedPoll();
+
     // Require Nexia account sign-in first
     if (!_authService.isLoggedIn()) {
         panel.innerHTML = `
@@ -198,8 +212,18 @@ export async function refreshCommunityView() {
     // Logged in — store user info
     discordAuthUser = { id: result.id, username: result.username, avatarUrl: result.avatarUrl };
 
-    // Check guild membership
+    // Check guild membership.
+    // Only nag when we POSITIVELY established they aren't a member. If the check
+    // couldn't run (expired Discord token, missing `guilds` scope, API hiccup),
+    // `determined` is false and we stay quiet — telling an actual member they
+    // haven't joined is worse than saying nothing.
     const guildCheck = await _ipcRenderer.invoke(_IPC.DISCORD_CHECK_GUILDS);
+
+    if (!guildCheck.determined) {
+        console.warn('[Community] Guild membership undetermined:', guildCheck.reason || guildCheck.error || 'unknown');
+        renderCommunityFeedView(panel);
+        return;
+    }
 
     if (!guildCheck.inNexiaServer) {
         // Show the feed UI but display a toast about joining the server

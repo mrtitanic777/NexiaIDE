@@ -1,0 +1,81 @@
+{
+  "name": "nexia-ide",
+  "displayName": "Nexia IDE",
+  "description": "Xbox 360 Development Environment & Adaptive C++ Tutor",
+  "version": "2.2.0",
+  "author": "Nexia",
+  "license": "MIT",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "tsc && node scripts/copy-assets.js",
+    "start": "npm run build && electron .",
+    "dist": "npm run build && electron-builder --win",
+    "dist:installer": "npm run build && electron-builder --win --config.win.target=nsis",
+    "dev": "npm run build && electron ."
+  },
+  "build": {
+    "appId": "com.nexia.ide",
+    "productName": "NexiaIDE",
+    "copyright": "Copyright 2026 Nexia",
+    "forceCodeSigning": false,
+    "artifactName": "NexiaIDE-${version}.${ext}",
+    "win": {
+      "target": [
+        {
+          "target": "dir",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "resources/icon.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "publisherName": "Nexia",
+      "legalTrademarks": "Nexia IDE",
+      "fileAssociations": [
+        {
+          "ext": "nexproj",
+          "name": "Nexia IDE Project",
+          "description": "Nexia IDE Project File",
+          "icon": "resources/icon.ico"
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "NexiaIDE.exe",
+      "unpackDirName": "NexiaIDE-data"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Nexia IDE"
+    },
+    "files": [
+      "dist/main/**/*",
+      "dist/renderer/**/*",
+      "dist/shared/**/*",
+      "resources/**/*",
+      "!node_modules/monaco-editor/dev/**/*",
+      "!node_modules/monaco-editor/esm/**/*",
+      "!node_modules/monaco-editor/min-maps/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "resources"
+      }
+    ],
+    "asarUnpack": []
+  },
+  "dependencies": {
+    "monaco-editor": "^0.45.0",
+    "marked": "^15.0.0",
+    "highlight.js": "^11.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^16.18.0",
+    "electron": "^22.3.27",
+    "electron-builder": "^24.9.0",
+    "typescript": "^5.3.0"
+  }
+}

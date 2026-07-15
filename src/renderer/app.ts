@@ -21,6 +21,7 @@ const IPC = {
     PROJECT_SAVE: 'project:save', PROJECT_GET_CONFIG: 'project:getConfig',
     PROJECT_GET_TEMPLATES: 'project:getTemplates',
     PROJECT_EXPORT: 'project:export', PROJECT_IMPORT: 'project:import',
+    VS_PICK: 'vs:pick', VS_PREVIEW: 'vs:preview', VS_IMPORT: 'vs:import',
     FILE_READ: 'file:read', FILE_WRITE: 'file:write', FILE_LIST: 'file:list',
     FILE_CREATE: 'file:create', FILE_DELETE: 'file:delete', FILE_RENAME: 'file:rename',
     FILE_SELECT_DIR: 'file:selectDir', FILE_SELECT_FILE: 'file:selectFile',
@@ -88,6 +89,7 @@ const quizzes = require('./learning/quizzes');
 const { learningProfile, MasteryLevel, MASTERY_LABELS } = require('./learning/learningProfile');
 const cinematicEngine = require('./learning/cinematicEngine');
 const { codeVisualizer } = require('./visualizer/codeVisualizer');
+const { lessonSystem } = require('./learning/lessonSystem');
 
 // ── Icons (cached before Monaco overwrites window.require) ──
 const icons = require('./icons');
@@ -162,6 +164,8 @@ interface UserSettings {
     aiFileContext: boolean;
     // Color mode
     colorMode: string;
+    /** Structural skin: 'default' | 'blade' | 'devkit' | 'phosphor' */
+    skin: string;
 }
 const DEFAULT_SETTINGS: UserSettings = {
     fontSize: 14,
@@ -186,6 +190,7 @@ const DEFAULT_SETTINGS: UserSettings = {
     aiInlineSuggest: false,
     aiFileContext: true,
     colorMode: 'dark',
+    skin: 'default',
 };
 let userSettings: UserSettings = { ...DEFAULT_SETTINGS };
 const SETTINGS_FILE = nodePath.join(nodeOs.homedir(), '.nexia-ide-prefs.json');
@@ -221,12 +226,16 @@ function saveUserSettings() {
 }
 
 let _cloudSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let _pullInFlight: Promise<void> | null = null;
 
 function scheduleCloudSync() {
     if (_cloudSyncTimer) clearTimeout(_cloudSyncTimer);
     _cloudSyncTimer = setTimeout(async () => {
         _cloudSyncTimer = null;
         if (!authService.isLoggedIn()) return;
+        // Don't push while a cloud pull is in flight — we'd overwrite the cloud
+        // with pre-pull (stale) local data. Re-arm and try after it settles.
+        if (_pullInFlight) { scheduleCloudSync(); return; }
         try {
             const cloudData: any = { ...userSettings };
             // Also include Discord auth if present
@@ -248,6 +257,15 @@ function scheduleCloudSync() {
 
 async function pullCloudSettings() {
     if (!authService.isLoggedIn()) return;
+    // Single-flight: a login fires this from both init() and the auth-state
+    // listener — coalesce so two concurrent pulls don't both overwrite local
+    // settings or interleave their file writes (last-writer-wins clobber).
+    if (_pullInFlight) return _pullInFlight;
+    // Cancel any pending debounced push so it can't fire with pre-pull (stale)
+    // local data while we're pulling.
+    if (_cloudSyncTimer) { clearTimeout(_cloudSyncTimer); _cloudSyncTimer = null; }
+
+    _pullInFlight = (async () => {
     try {
         const result = await authService.loadCloudSettings();
         if (!result || !result.settings || Object.keys(result.settings).length === 0) return;
@@ -306,6 +324,340 @@ async function pullCloudSettings() {
             });
         }
     } catch {}
+    })();
+
+    try {
+        await _pullInFlight;
+    } finally {
+        _pullInFlight = null;
+    }
+}
+
+// ── Learning-Profile Cloud Sync ──
+// Mirrors the settings sync above: debounced push of the profile snapshot,
+// single-flight pull-and-merge on login. Merge is monotonic (see
+// learningProfile.mergeSnapshot) so devices never clobber each other.
+
+let _progressSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let _progressPullInFlight: Promise<void> | null = null;
+
+function scheduleProgressSync() {
+    if (_progressSyncTimer) clearTimeout(_progressSyncTimer);
+    _progressSyncTimer = setTimeout(async () => {
+        _progressSyncTimer = null;
+        if (!authService.isLoggedIn()) return;
+        // Don't push mid-pull — we'd upload pre-merge (stale) data. Re-arm.
+        if (_progressPullInFlight) { scheduleProgressSync(); return; }
+        try { await authService.saveCloudProgress(learningProfile.serialize()); } catch {}
+    }, 2500); // debounce
+}
+
+async function pullCloudProgress() {
+    if (!authService.isLoggedIn()) return;
+    if (_progressPullInFlight) return _progressPullInFlight;
+    if (_progressSyncTimer) { clearTimeout(_progressSyncTimer); _progressSyncTimer = null; }
+
+    _progressPullInFlight = (async () => {
+        try {
+            const result = await authService.loadCloudProgress();
+            if (result && result.progress) {
+                const changed = learningProfile.mergeSnapshot(result.progress);
+                if (changed) {
+                    learningProfile.save();
+                    try { renderLearnPanel(); } catch {}
+                    appendOutput('Cloud learning progress synced.\n');
+                }
+                // Push the merged union back so the cloud reflects both devices.
+                try { await authService.saveCloudProgress(learningProfile.serialize()); } catch {}
+            } else {
+                // No cloud progress yet — seed it from local so other devices can pull.
+                try { await authService.saveCloudProgress(learningProfile.serialize()); } catch {}
+            }
+        } catch {}
+    })();
+
+    try { await _progressPullInFlight; } finally { _progressPullInFlight = null; }
+}
+
+// ── Visual Studio import ──
+// Pick a .sln/.vcxproj, show exactly what will be brought over, then copy it
+// into a real Nexia project. Nothing is written until the user confirms.
+
+async function importFromVisualStudio() {
+    const picked = await ipcRenderer.invoke(IPC.VS_PICK);
+    if (!picked.success) {
+        if (picked.error && picked.error !== 'Cancelled') appendOutput('VS import: ' + picked.error + '\n');
+        return;
+    }
+
+    const projects: any[] = picked.projects || [];
+    let selected = projects[0];
+
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:100001;display:flex;align-items:center;justify-content:center';
+    const modal = document.createElement('div');
+    modal.style.cssText = 'width:min(620px,94vw);max-height:88vh;display:flex;flex-direction:column;background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,0.6)';
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    function close() { overlay.remove(); document.removeEventListener('keydown', onKey); }
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') close(); }
+    document.addEventListener('keydown', onKey);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+    async function render() {
+        const prev = await ipcRenderer.invoke(IPC.VS_PREVIEW, selected.path);
+        const p = prev.success ? prev.preview : null;
+
+        modal.innerHTML = `
+            <div style="padding:18px 20px 12px;border-bottom:1px solid var(--border)">
+                <div style="font-size:15px;font-weight:600;color:var(--text)">Import from Visual Studio</div>
+                <div style="font-size:11.5px;color:var(--text-muted);margin-top:3px">${escapeHtml(picked.kind === 'sln' ? picked.name + '.sln' : selected.name)}${projects.length > 1 ? ` · ${projects.length} projects` : ''}</div>
+            </div>
+            <div style="padding:16px 20px;overflow-y:auto;flex:1">
+                ${projects.length > 1 ? `
+                    <div style="font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:7px">Project to import</div>
+                    <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:16px">
+                        ${projects.map((pr, i) => `
+                            <button class="vs-proj" data-i="${i}" style="text-align:left;padding:8px 10px;border:1px solid ${pr.path === selected.path ? 'var(--green)' : 'var(--border)'};background:${pr.path === selected.path ? 'var(--green-bg)' : 'var(--bg-input)'};color:var(--text);border-radius:var(--radius-sm);cursor:pointer;font-size:12px">
+                                ${escapeHtml(pr.name)}${pr.exists ? '' : ' <span style="color:var(--red)">(missing)</span>'}
+                            </button>`).join('')}
+                    </div>` : ''}
+                ${!p ? `<div style="color:var(--red);font-size:12.5px">Couldn't read that project: ${escapeHtml(prev.error || 'unknown error')}</div>` : `
+                    <div style="font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:7px">What comes over</div>
+                    <div style="background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-md);padding:12px 14px;font-size:12px;color:var(--text);line-height:1.9">
+                        <div><b>${p.sourceCount}</b> source file${p.sourceCount === 1 ? '' : 's'} · <b>${p.headerCount}</b> header${p.headerCount === 1 ? '' : 's'}${p.otherCount ? ` · <b>${p.otherCount}</b> other` : ''}</div>
+                        <div>Type: <b>${escapeHtml(p.type)}</b> · Format: <b>${escapeHtml(p.format)}</b>${p.pchHeader ? ` · PCH: <b>${escapeHtml(p.pchHeader)}</b>` : ''}</div>
+                        ${p.libraries.length ? `<div>Libraries: <span style="color:var(--text-dim)">${escapeHtml(p.libraries.join(', '))}</span></div>` : ''}
+                        ${p.defines.length ? `<div>Defines: <span style="color:var(--text-dim)">${escapeHtml(p.defines.join(', '))}</span></div>` : ''}
+                        ${p.includeDirectories.length ? `<div>Include dirs: <span style="color:var(--text-dim)">${escapeHtml(p.includeDirectories.join(', '))}</span></div>` : ''}
+                    </div>
+                    ${p.warnings.length ? `
+                        <div style="font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--yellow);margin:14px 0 6px">Not imported (${p.warnings.length})</div>
+                        <div style="background:rgba(204,167,0,0.07);border:1px solid rgba(204,167,0,0.25);border-radius:var(--radius-md);padding:10px 12px;max-height:120px;overflow-y:auto">
+                            ${p.warnings.map((w: string) => `<div style="font-size:11px;color:var(--text-dim);line-height:1.6">• ${escapeHtml(w)}</div>`).join('')}
+                        </div>` : ''}
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:12px;line-height:1.6">
+                        Your Visual Studio project is <b>copied, never moved</b> — the original keeps working.
+                        Xbox 360 SDK paths aren't copied because Nexia adds them from its own detected SDK.
+                    </div>`}
+                <div id="vs-result" style="display:none;margin-top:14px;font-size:12px"></div>
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;padding:14px 20px;border-top:1px solid var(--border)">
+                <button id="vs-cancel" class="welcome-btn">Cancel</button>
+                <button id="vs-go" class="welcome-btn" style="background:var(--green);color:#06120d;border-color:var(--green);font-weight:600" ${p ? '' : 'disabled'}>Choose folder &amp; import</button>
+            </div>`;
+
+        modal.querySelectorAll('.vs-proj').forEach(b => b.addEventListener('click', () => {
+            selected = projects[parseInt((b as HTMLElement).dataset.i!, 10)];
+            render();
+        }));
+        modal.querySelector('#vs-cancel')!.addEventListener('click', close);
+        modal.querySelector('#vs-go')!.addEventListener('click', async () => {
+            const go = modal.querySelector('#vs-go') as HTMLButtonElement;
+            const res = modal.querySelector('#vs-result') as HTMLElement;
+            go.disabled = true; go.textContent = 'Importing…';
+            const r = await ipcRenderer.invoke(IPC.VS_IMPORT, { projectPath: selected.path, name: selected.name });
+            if (!r.success) {
+                res.style.display = 'block';
+                res.style.color = r.error === 'Cancelled' ? 'var(--text-dim)' : 'var(--red)';
+                res.textContent = r.error === 'Cancelled' ? 'Import cancelled.' : 'Import failed: ' + r.error;
+                go.disabled = false; go.textContent = 'Choose folder & import';
+                return;
+            }
+            const rep = r.report;
+            appendOutput(`Imported "${rep.config.name}" from Visual Studio — ${rep.filesCopied} files (${(rep.bytesCopied / 1048576).toFixed(1)} MB).\n`);
+            if (rep.skipped.length) appendOutput(`  ${rep.skipped.length} file(s) skipped: ${rep.skipped.slice(0, 5).join(', ')}${rep.skipped.length > 5 ? '…' : ''}\n`);
+            close();
+            try { await openProject(rep.config.path); } catch { appendOutput('Imported, but failed to open it automatically.\n'); }
+        });
+    }
+
+    render();
+}
+
+// ── Welcome-back / account prompt ──
+// Shown only when NOT signed in. Signed-in users are never interrupted by this —
+// the release popup is the only thing that greets them.
+
+function showAccountPrompt(onResolved?: () => void) {
+    const last = authService.getLastAccount();
+
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:99998;display:flex;align-items:center;justify-content:center';
+    const modal = document.createElement('div');
+    modal.style.cssText = 'width:min(500px,92vw);background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,0.6)';
+    overlay.appendChild(modal);
+
+    function done() {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+        onResolved?.();
+    }
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') done(); }
+
+    const initials = (last?.username || '?').substring(0, 2).toUpperCase();
+
+    modal.innerHTML = `
+        <div style="padding:22px 22px 4px">
+            ${last ? `
+                <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+                    <div style="width:40px;height:40px;border-radius:50%;background:var(--green);color:#06120d;display:grid;place-items:center;font-weight:700;font-size:14px">${escapeHtml(initials)}</div>
+                    <div>
+                        <div style="font-size:15px;font-weight:600;color:var(--text)">Welcome back, ${escapeHtml(last.username)}</div>
+                        <div style="font-size:12px;color:var(--text-muted)">Last signed in as ${escapeHtml(last.email || '')}</div>
+                    </div>
+                </div>
+                <div style="font-size:12.5px;color:var(--text-dim);line-height:1.6">Your session has ended. Sign back in to keep your progress, lessons and settings synced.</div>`
+            : `
+                <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:6px">Sign in to Nexia</div>
+                <div style="font-size:12.5px;color:var(--text-dim);line-height:1.6">An account syncs your progress and unlocks cloud lessons. You can also use the IDE without one.</div>`}
+        </div>
+        <div style="padding:16px 22px 4px">
+            <div style="display:flex;gap:14px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-md);padding:12px 14px">
+                <div style="flex:1">
+                    <div style="font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--green);margin-bottom:6px">With an account</div>
+                    <div style="font-size:11.5px;color:var(--text-dim);line-height:1.75">
+                        ✓ Progress syncs across devices<br>
+                        ✓ Download &amp; update cloud lessons<br>
+                        ✓ Settings follow you everywhere<br>
+                        ✓ Discord community features
+                    </div>
+                </div>
+                <div style="width:1px;background:var(--border)"></div>
+                <div style="flex:1">
+                    <div style="font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px">Without one</div>
+                    <div style="font-size:11.5px;color:var(--text-dim);line-height:1.75">
+                        ✓ Editor, build &amp; SDK tools<br>
+                        ✓ Devkit, emulator &amp; curriculum<br>
+                        ✗ Progress stays on this PC only<br>
+                        ✗ No cloud lessons or sync
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px;padding:16px 22px 20px">
+            ${last
+                ? `<button id="ap-same" class="welcome-btn" style="background:var(--green);color:#06120d;border-color:var(--green);font-weight:600;justify-content:center">Sign in as ${escapeHtml(last.username)}</button>
+                   <button id="ap-diff" class="welcome-btn" style="justify-content:center">Use a different account</button>`
+                : `<button id="ap-diff" class="welcome-btn" style="background:var(--green);color:#06120d;border-color:var(--green);font-weight:600;justify-content:center">Sign in</button>
+                   <button id="ap-new" class="welcome-btn" style="justify-content:center">Create an account</button>`}
+            <button id="ap-none" class="welcome-btn" style="justify-content:center;border-color:transparent;color:var(--text-dim)">Continue without an account</button>
+        </div>`;
+
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', onKey);
+
+    modal.querySelector('#ap-same')?.addEventListener('click', () => { done(); authUI.showLogin(last?.email); });
+    modal.querySelector('#ap-diff')?.addEventListener('click', () => { done(); authUI.showLogin(); });
+    modal.querySelector('#ap-new')?.addEventListener('click', () => { done(); authUI.showRegister(); });
+    modal.querySelector('#ap-none')?.addEventListener('click', () => {
+        appendOutput('Continuing without an account — progress will stay on this PC.\n');
+        done();
+    });
+}
+
+// ── Software Updates ──
+// Clients poll the release manifest on the Nexia server. If it advertises a
+// newer version than this build, we surface the release popup. The installer
+// is fetched from the CDN path and hash-verified in the main process.
+
+let _updatePromptShown = false;
+
+async function checkForUpdates(): Promise<void> {
+    try {
+        if (_updatePromptShown) return;
+        const appVersion: string = await ipcRenderer.invoke('app:version');
+        const resp = await fetch(authService.getServerUrl() + '/api/updates/latest', {
+            signal: AbortSignal.timeout(8000),
+        });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const u = data?.update;
+        if (!u?.version || !u?.downloadUrl) return;
+        if (cmpVersions(u.version, appVersion) <= 0) return; // already current
+        _updatePromptShown = true;
+        showUpdateModal(u, appVersion);
+    } catch { /* offline / server down — never block startup on this */ }
+}
+
+function showUpdateModal(u: any, currentVersion: string) {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:100000;display:flex;align-items:center;justify-content:center';
+    const modal = document.createElement('div');
+    modal.style.cssText = 'width:min(520px,92vw);background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,0.6)';
+    overlay.appendChild(modal);
+
+    const notes: string[] = Array.isArray(u.notes) ? u.notes : [];
+    const sizeMb = u.size ? (u.size / 1048576).toFixed(1) + ' MB' : '';
+
+    function close() { overlay.remove(); document.removeEventListener('keydown', onKey); }
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape' && !u.mandatory) close(); }
+
+    modal.innerHTML = `
+        <div style="padding:20px 22px 0">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+                <span style="font-size:20px">🚀</span>
+                <div style="font-size:16px;font-weight:600;color:var(--text)">NexiaIDE v${escapeHtml(u.version)} has been released!</div>
+            </div>
+            <div style="font-size:12.5px;color:var(--text-dim);margin-left:30px">${escapeHtml(u.title || '')}</div>
+        </div>
+        <div style="padding:16px 22px">
+            <div style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px">What's new</div>
+            <div id="upd-notes" style="max-height:210px;overflow-y:auto;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-md);padding:12px 14px">
+                ${notes.length
+                    ? notes.map(n => `<div style="display:flex;gap:8px;font-size:12.5px;color:var(--text);line-height:1.6;margin-bottom:5px"><span style="color:var(--green)">•</span><span>${escapeHtml(n)}</span></div>`).join('')
+                    : '<div style="font-size:12.5px;color:var(--text-dim)">General improvements and fixes.</div>'}
+            </div>
+            <div style="display:flex;gap:10px;font-size:11px;color:var(--text-muted);margin-top:10px">
+                <span>You have v${escapeHtml(currentVersion)}</span>${sizeMb ? `<span>·</span><span>Download ${sizeMb}</span>` : ''}${u.mandatory ? '<span>·</span><span style="color:var(--yellow)">Required update</span>' : ''}
+            </div>
+            <div id="upd-prog" style="display:none;margin-top:14px">
+                <div style="height:6px;background:var(--bg-dark);border-radius:3px;overflow:hidden"><div id="upd-bar" style="height:100%;width:0%;background:var(--green);transition:width .15s"></div></div>
+                <div id="upd-stat" style="font-size:11px;color:var(--text-dim);margin-top:6px">Starting download…</div>
+            </div>
+        </div>
+        <div style="display:flex;gap:8px;padding:14px 22px 18px;border-top:1px solid var(--border)">
+            <div style="font-size:12.5px;color:var(--text-dim);align-self:center;flex:1">Would you like to install it?</div>
+            ${u.mandatory ? '' : '<button id="upd-later" class="welcome-btn">Later</button>'}
+            <button id="upd-install" class="welcome-btn" style="background:var(--green);color:#06120d;border-color:var(--green);font-weight:600">Install Now</button>
+        </div>`;
+
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', onKey);
+    modal.querySelector('#upd-later')?.addEventListener('click', close);
+
+    modal.querySelector('#upd-install')!.addEventListener('click', async () => {
+        const btn = modal.querySelector('#upd-install') as HTMLButtonElement;
+        const later = modal.querySelector('#upd-later') as HTMLButtonElement | null;
+        btn.disabled = true; btn.textContent = 'Downloading…';
+        if (later) later.disabled = true;
+        (modal.querySelector('#upd-prog') as HTMLElement).style.display = 'block';
+
+        const bar = modal.querySelector('#upd-bar') as HTMLElement;
+        const stat = modal.querySelector('#upd-stat') as HTMLElement;
+        const onProg = (_e: any, p: any) => {
+            bar.style.width = p.pct + '%';
+            stat.textContent = `Downloading… ${p.pct}% (${(p.received / 1048576).toFixed(1)} / ${(p.total / 1048576).toFixed(1)} MB)`;
+        };
+        ipcRenderer.on('update:progress', onProg);
+
+        const res = await ipcRenderer.invoke('update:download', {
+            url: u.downloadUrl, sha256: u.sha256 || null, version: u.version,
+        });
+        ipcRenderer.removeListener('update:progress', onProg);
+
+        if (!res?.success) {
+            stat.textContent = 'Update failed: ' + (res?.error || 'unknown error');
+            stat.style.color = 'var(--red)';
+            btn.disabled = false; btn.textContent = 'Retry';
+            if (later) later.disabled = false;
+            return;
+        }
+        stat.textContent = 'Verified. Launching installer…';
+        btn.textContent = 'Installing…';
+        await ipcRenderer.invoke('update:install', res.path);
+    });
 }
 
 // ── Session State (open tabs, active file, last project) ──
@@ -362,6 +714,9 @@ async function restoreSession() {
 }
 
 function applyThemeColors() {
+    // Structural skin (Blade / Devkit / Phosphor) — CSS is scoped to [data-skin].
+    document.documentElement.dataset.skin = userSettings.skin || 'default';
+
     const r = document.documentElement.style;
     r.setProperty('--green', userSettings.accentColor);
     // Compute dim/bg variants from accent
@@ -1355,6 +1710,16 @@ function initTabContextMenu() {
 function closeOtherTabs(keepPath: string) {
     const toClose = openTabs.filter(t => t.path !== keepPath);
     for (const tab of toClose) {
+        // Prompt to save unsaved changes (skip special tabs), and release the
+        // file watcher — otherwise fs.watch handles leak for every closed tab.
+        if (!tab.path.startsWith('__xex_inspector__:') && !tab.path.startsWith('__cinematic__:') && tab.modified) {
+            const save = confirm(`"${tab.name}" has unsaved changes. Save before closing?`);
+            if (save) {
+                ignoreNextChange(tab.path);
+                ipcRenderer.invoke(IPC.FILE_WRITE, tab.path, tab.model.getValue());
+            }
+        }
+        unwatchFile(tab.path);
         tab.model.dispose();
     }
     openTabs = openTabs.filter(t => t.path === keepPath);
@@ -1363,6 +1728,7 @@ function closeOtherTabs(keepPath: string) {
         else { activeTab = null; $('editor-container').style.display = 'none'; $('welcome-screen').style.display = 'flex'; }
     }
     renderTabs();
+    saveSession();
 }
 
 // ══════════════════════════════════════
@@ -1392,6 +1758,8 @@ function confirmUnsavedAndClose() {
     // Save learning progress before closing
     learningProfile.endSession();
     learningProfile.save();
+    // Best-effort final push of learning progress to the cloud on exit.
+    if (authService.isLoggedIn()) { try { authService.saveCloudProgress(learningProfile.serialize()); } catch {} }
 
     if (hasUnsavedChanges()) {
         const choice = confirm('You have unsaved changes. Save all before closing?');
@@ -2198,6 +2566,7 @@ function toggleUserPanel() {
             <div class="up-section">
                 <div class="up-section-title">IDE</div>
                 <div class="up-item" data-action="settings"><span class="up-item-icon">⚙</span>Settings</div>
+                <div class="up-item" data-action="serversettings"><span class="up-item-icon">🌐</span>Server Settings</div>
             </div>
             <div class="up-section">
                 <div class="up-section-title">Account</div>
@@ -2216,6 +2585,7 @@ function toggleUserPanel() {
             <div class="up-section">
                 <div class="up-section-title">IDE</div>
                 <div class="up-item" data-action="settings"><span class="up-item-icon">⚙</span>Settings</div>
+                <div class="up-item" data-action="serversettings"><span class="up-item-icon">🌐</span>Server Settings</div>
             </div>`;
     }
 
@@ -2226,6 +2596,7 @@ function toggleUserPanel() {
         closeUserPanel();
         switch (action) {
             case 'settings': showSettingsPanel(); break;
+            case 'serversettings': authUI.showServerSettings(); break;
             case 'signout': authService.logout(); break;
             case 'signin': authUI.showLogin(); break;
             case 'register': authUI.showRegister(); break;
@@ -3140,6 +3511,46 @@ const PRESETS: Record<string, Partial<UserSettings>> = {
     mono:   { accentColor: '#cccccc', bgDark: '#141414', bgMain: '#1a1a1a', bgPanel: '#1a1a1a', bgSidebar: '#222222', editorBg: '#1a1a1a', textColor: '#d4d4d4', textDim: '#808080' },
 };
 
+/**
+ * Structural skins. Unlike PRESETS (which only swap colors), each skin also
+ * restyles component structure via CSS scoped to [data-skin="..."] in main.css.
+ * Each pairs its `skin` id with a palette tuned for it.
+ */
+const SKINS: Record<string, { label: string; desc: string; settings: Partial<UserSettings> }> = {
+    default: {
+        label: 'Default',
+        desc: 'Clean, familiar editor chrome.',
+        settings: { skin: 'default', ...PRESETS.xbox },
+    },
+    blade: {
+        label: 'Blade',
+        desc: 'The 2005 Xbox 360 dashboard — sliding blades, ring of light, deep green field.',
+        settings: {
+            skin: 'blade', accentColor: '#9fe870', bgDark: '#06120d', bgMain: '#0a1f15',
+            bgPanel: '#0e3521', bgSidebar: '#0c2f1e', editorBg: '#06120d',
+            textColor: '#e9f6e2', textDim: '#8fb083',
+        },
+    },
+    devkit: {
+        label: 'Devkit',
+        desc: 'The IDE as hardware — brushed chassis, machined bezel, keycaps, status LEDs.',
+        settings: {
+            skin: 'devkit', accentColor: '#5ee07f', bgDark: '#141618', bgMain: '#24272b',
+            bgPanel: '#2a2d31', bgSidebar: '#1b1e21', editorBg: '#0a0c0d',
+            textColor: '#dfe4ea', textDim: '#8b919a',
+        },
+    },
+    phosphor: {
+        label: 'Phosphor',
+        desc: 'CRT terminal brutalism — monospace, scanlines, hard edges, phosphor glow.',
+        settings: {
+            skin: 'phosphor', accentColor: '#41ff8a', bgDark: '#050705', bgMain: '#050705',
+            bgPanel: '#070d08', bgSidebar: '#050705', editorBg: '#050705',
+            textColor: '#41ff8a', textDim: '#2aa85c',
+        },
+    },
+};
+
 function renderSettingsSection(container: HTMLElement, section: string) {
     // Save AI settings before switching sections so nothing is lost
     saveSettingsFromUI();
@@ -3169,6 +3580,15 @@ function renderSettingsSection(container: HTMLElement, section: string) {
         case 'appearance':
             container.innerHTML = `
                 <h2 style="font-size:18px;font-weight:600;color:var(--text);margin:0 0 20px;">Appearance</h2>
+                ${sectionTitle('Skin')}
+                <div style="font-size:11px;color:var(--text-muted);margin:0 0 10px;">A skin changes the IDE's structure — not just its colors.</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px;">
+                    ${Object.entries(SKINS).map(([id, sk]) => `
+                        <button class="skin-btn" data-skin="${id}" style="text-align:left;padding:10px 12px;border:1px solid ${(s.skin || 'default') === id ? 'var(--green)' : 'var(--border)'};background:${(s.skin || 'default') === id ? 'var(--green-bg)' : 'var(--bg-input)'};color:var(--text);border-radius:var(--radius-md);cursor:pointer;">
+                            <div style="font-size:12.5px;font-weight:600;margin-bottom:3px;">${escapeHtml(sk.label)}${(s.skin || 'default') === id ? ' <span style="color:var(--green)">✓</span>' : ''}</div>
+                            <div style="font-size:10.5px;color:var(--text-muted);line-height:1.45;">${escapeHtml(sk.desc)}</div>
+                        </button>`).join('')}
+                </div>
                 ${sectionTitle('Visual Effects')}
                 ${row('Fancy Mode', toggle('sp-fancy', s.fancyEffects))}
                 <div style="font-size:11px;color:var(--text-muted);margin:2px 0 12px;">Glassmorphism, glow effects, animations, floating orbs, and decorative shadows.</div>
@@ -3206,6 +3626,19 @@ function renderSettingsSection(container: HTMLElement, section: string) {
                     if (key) (userSettings as any)[key] = t.value;
                     applyThemeColors();
                     saveUserSettings();
+                });
+            });
+            // Skins — apply the structural skin plus its tuned palette
+            container.querySelectorAll('.skin-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const id = (btn as HTMLElement).dataset.skin;
+                    if (id && SKINS[id]) {
+                        Object.assign(userSettings, SKINS[id].settings);
+                        saveUserSettings();
+                        applyThemeColors();
+                        renderSettingsSection(container, 'appearance');
+                        appendOutput(`Skin: ${SKINS[id].label}\n`);
+                    }
                 });
             });
             // Presets
@@ -3983,6 +4416,204 @@ function triggerAchievement(id: string) {
 // ══════════════════════════════════════
 //  LEARN PANEL (sidebar)
 // ══════════════════════════════════════
+/** Compare dotted version strings. Returns >0 if a is newer, <0 if older, 0 if equal. */
+function cmpVersions(a: string, b: string): number {
+    const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
+    const pb = String(b || '0').split('.').map(n => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const d = (pa[i] || 0) - (pb[i] || 0);
+        if (d !== 0) return d;
+    }
+    return 0;
+}
+
+/** Download (or update) a cloud lesson into the local registry, then refresh the Learn panel. */
+async function downloadCloudLesson(cloudId: string, btn?: HTMLButtonElement) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Downloading…'; }
+    try {
+        const full = await authService.getCloudLesson(cloudId);
+        if (!full.success || !full.lesson) { throw new Error(full.error || 'Fetch failed'); }
+        // Install under the cloud id so update-detection lines up with the catalog.
+        const res = await ipcRenderer.invoke('lesson:save', cloudId, full.lesson);
+        if (!res || res.success === false) throw new Error(res?.error || 'Install failed');
+        appendOutput('Installed cloud lesson: ' + (full.lesson.meta?.title || cloudId) + '\n');
+        renderLearnPanel();
+    } catch (err: any) {
+        appendOutput('Cloud lesson download failed: ' + (err.message || err) + '\n');
+        if (btn) { btn.disabled = false; btn.textContent = 'Download'; }
+    }
+}
+
+/** Count cloud lessons that have a newer version than what's installed locally. */
+async function countLessonUpdates(): Promise<number> {
+    try {
+        const cloudRes = await authService.getCloudLessons();
+        if (!cloudRes.success || !cloudRes.lessons?.length) return 0;
+        const installed: any[] = (await ipcRenderer.invoke(IPC.LESSON_LIST)) || [];
+        const byId = new Map(installed.map((l: any) => [l.id, l]));
+        let n = 0;
+        for (const cl of cloudRes.lessons) {
+            const local = byId.get(cl.id);
+            if (local && cmpVersions(cl.version, local.version) > 0) n++;
+        }
+        return n;
+    } catch { return 0; }
+}
+
+/** Render a single lesson content item (text/code/exercise/quiz/visualization) into an element. */
+function renderLessonContentItem(item: any, lesson: any): HTMLElement {
+    const wrap = document.createElement('div');
+    const type = item.type;
+
+    if (type === 'code') {
+        const pre = document.createElement('pre');
+        pre.style.cssText = 'margin:0;padding:14px;background:var(--bg-dark,#0d0d12);border:1px solid var(--border,#2a2a35);border-radius:8px;overflow-x:auto;font-family:"Cascadia Code",Consolas,monospace;font-size:12.5px;line-height:1.55;color:var(--text,#d4d4dc);white-space:pre';
+        pre.textContent = item.content || '';
+        wrap.appendChild(pre);
+    } else if (type === 'exercise') {
+        const prompt = document.createElement('div');
+        prompt.style.cssText = 'padding:12px 14px;border-left:3px solid #e5c07b;background:rgba(229,192,123,0.06);border-radius:4px;font-size:13px;line-height:1.6;white-space:pre-wrap;color:var(--text,#d4d4dc)';
+        prompt.textContent = item.content || '';
+        wrap.appendChild(prompt);
+        if (item.hint) {
+            const hint = document.createElement('details');
+            hint.style.cssText = 'margin-top:10px;font-size:12px;color:var(--text-dim,#9a9aa5)';
+            hint.innerHTML = `<summary style="cursor:pointer;color:#e5c07b">💡 Hint</summary><div style="padding:8px 0 0 4px;white-space:pre-wrap">${escapeHtml(item.hint)}</div>`;
+            wrap.appendChild(hint);
+        }
+        if (item.solution) {
+            const sol = document.createElement('details');
+            sol.style.cssText = 'margin-top:6px;font-size:12px';
+            sol.innerHTML = `<summary style="cursor:pointer;color:#4ec9b0">✓ Solution</summary><pre style="margin:8px 0 0;padding:10px;background:var(--bg-dark,#0d0d12);border-radius:6px;overflow-x:auto;font-family:monospace;font-size:12px;white-space:pre;color:var(--text,#d4d4dc)">${escapeHtml(item.solution)}</pre>`;
+            wrap.appendChild(sol);
+        }
+    } else if (type === 'quiz' && Array.isArray(item.options) && item.options.length) {
+        const q = document.createElement('div');
+        q.style.cssText = 'font-size:14px;line-height:1.6;margin-bottom:12px;color:var(--text,#d4d4dc);white-space:pre-wrap';
+        q.textContent = item.content || item.title || '';
+        wrap.appendChild(q);
+        let answered = false;
+        item.options.forEach((opt: string, i: number) => {
+            const btn = document.createElement('button');
+            btn.style.cssText = 'display:block;width:100%;text-align:left;margin:6px 0;padding:10px 12px;background:var(--bg-input,#22222c);border:1px solid var(--border,#2a2a35);border-radius:6px;color:var(--text,#d4d4dc);font-size:12.5px;cursor:pointer';
+            btn.textContent = opt;
+            btn.addEventListener('click', () => {
+                if (answered) return;
+                answered = true;
+                const correct = i === item.correctOption;
+                btn.style.borderColor = correct ? '#4ec9b0' : '#e06c75';
+                btn.style.background = correct ? 'rgba(78,201,176,0.12)' : 'rgba(224,108,117,0.12)';
+                if (!correct) {
+                    const right = wrap.querySelectorAll('button')[item.correctOption] as HTMLElement;
+                    if (right) { right.style.borderColor = '#4ec9b0'; right.style.background = 'rgba(78,201,176,0.12)'; }
+                }
+                try { learningProfile.recordInteraction(lesson.concepts?.[0] || 'quiz', 'quiz', correct, 0); scheduleProgressSync(); } catch {}
+            });
+            wrap.appendChild(btn);
+        });
+    } else if (type === 'visualization') {
+        const v = document.createElement('div');
+        v.style.cssText = 'padding:12px 14px;border:1px dashed var(--border,#2a2a35);border-radius:8px;font-size:12px;color:var(--text-dim,#9a9aa5)';
+        v.innerHTML = `<div style="color:#56d4f5;font-weight:600;margin-bottom:6px">📊 ${escapeHtml(item.title || 'Visualization')}</div><code style="font-family:monospace;font-size:11px">${escapeHtml(item.content || '')}</code>`;
+        wrap.appendChild(v);
+    } else {
+        // text (default): split into paragraphs
+        const body = document.createElement('div');
+        body.style.cssText = 'font-size:13.5px;line-height:1.7;color:var(--text,#d4d4dc)';
+        for (const para of String(item.content || '').split('\n\n')) {
+            const p = document.createElement('p');
+            p.style.cssText = 'margin:0 0 12px;white-space:pre-wrap';
+            p.textContent = para;
+            body.appendChild(p);
+        }
+        wrap.appendChild(body);
+    }
+    return wrap;
+}
+
+/** Open the curriculum lesson viewer overlay for a given lesson, wiring progress tracking. */
+function openLessonViewer(moduleId: string, lessonId: string) {
+    const lesson = lessonSystem.getLesson(moduleId, lessonId);
+    if (!lesson || !lesson.content?.length) return;
+    lessonSystem.goToLesson(moduleId, lessonId);
+
+    // Mark started immediately.
+    try { learningProfile.recordLessonProgress(lesson.id, 0, lesson.content.length, false); } catch {}
+
+    let idx = 0;
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.62);z-index:99999;display:flex;align-items:center;justify-content:center';
+    const modal = document.createElement('div');
+    modal.style.cssText = 'width:min(760px,92vw);max-height:88vh;display:flex;flex-direction:column;background:var(--bg-panel,#17171e);border:1px solid var(--border,#2a2a35);border-radius:12px;overflow:hidden;box-shadow:0 24px 80px rgba(0,0,0,0.6)';
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    function close() {
+        try { learningProfile.save(); } catch {}
+        scheduleProgressSync();
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+        renderLearnPanel();
+    }
+    function onKey(e: KeyboardEvent) {
+        if (e.key === 'Escape') close();
+        else if (e.key === 'ArrowRight') next();
+        else if (e.key === 'ArrowLeft') prev();
+    }
+    function prev() { if (idx > 0) { idx--; render(); } }
+    function next() {
+        const total = lesson.content.length;
+        if (idx < total - 1) { idx++; render(); }
+        else {
+            try {
+                learningProfile.recordLessonProgress(lesson.id, total, total, true);
+                for (const c of (lesson.concepts || [])) learningProfile.recordInteraction(c, 'lesson', true, 0);
+                learningProfile.save();
+            } catch {}
+            scheduleProgressSync();
+            appendOutput(`✓ Completed lesson: ${lesson.title}\n`);
+            try { checkAchievements(); } catch {}
+            close();
+        }
+    }
+
+    function render() {
+        const total = lesson.content.length;
+        const item = lesson.content[idx];
+        const isLast = idx >= total - 1;
+        try { learningProfile.recordLessonProgress(lesson.id, idx + 1, total, false); } catch {}
+
+        modal.innerHTML = '';
+        const header = document.createElement('div');
+        header.style.cssText = 'display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--border,#2a2a35)';
+        header.innerHTML = `<div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:600;color:var(--text,#d4d4dc)">${escapeHtml(lesson.title)}</div><div style="font-size:11px;color:var(--text-muted,#7a7a85)">${escapeHtml(item.title || '')} · Step ${idx + 1} of ${total}</div></div><button id="lv-close" style="background:none;border:none;color:var(--text-muted,#7a7a85);font-size:18px;cursor:pointer;line-height:1">✕</button>`;
+        modal.appendChild(header);
+
+        const pbar = document.createElement('div');
+        pbar.style.cssText = 'height:3px;background:var(--border,#2a2a35)';
+        pbar.innerHTML = `<div style="height:100%;width:${Math.round(((idx + 1) / total) * 100)}%;background:#4ec9b0;transition:width .2s"></div>`;
+        modal.appendChild(pbar);
+
+        const body = document.createElement('div');
+        body.style.cssText = 'padding:20px 18px;overflow-y:auto;flex:1';
+        body.appendChild(renderLessonContentItem(item, lesson));
+        modal.appendChild(body);
+
+        const footer = document.createElement('div');
+        footer.style.cssText = 'display:flex;gap:8px;align-items:center;padding:14px 18px;border-top:1px solid var(--border,#2a2a35)';
+        footer.innerHTML = `<button id="lv-prev" class="learn-action-btn" ${idx === 0 ? 'disabled' : ''}>← Previous</button><div style="flex:1"></div><button id="lv-next" class="learn-action-btn learn-action-primary">${isLast ? '✓ Complete Lesson' : 'Next →'}</button>`;
+        modal.appendChild(footer);
+
+        header.querySelector('#lv-close')!.addEventListener('click', close);
+        footer.querySelector('#lv-prev')!.addEventListener('click', prev);
+        footer.querySelector('#lv-next')!.addEventListener('click', next);
+    }
+
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    document.addEventListener('keydown', onKey);
+    render();
+}
+
 async function renderLearnPanel() {
     const panel = $('learn-panel');
     if (!panel) return;
@@ -4031,6 +4662,94 @@ async function renderLearnPanel() {
 
     lessonsSection.appendChild(grid);
     panel.appendChild(lessonsSection);
+
+    // ── Cloud Lessons (public catalog: download + update) ──
+    try {
+        const cloudRes = await authService.getCloudLessons();
+        const cloudLessons = (cloudRes.success && cloudRes.lessons) ? cloudRes.lessons : [];
+        if (cloudLessons.length > 0) {
+            const installedById = new Map(importedLessons.map((l: any) => [l.id, l]));
+            let updateCount = 0;
+
+            const cloudGrid = document.createElement('div');
+            cloudGrid.className = 'lesson-grid';
+
+            for (const cl of cloudLessons) {
+                const installed = installedById.get(cl.id);
+                const state = !installed ? 'new'
+                    : (cmpVersions(cl.version, installed.version) > 0 ? 'update' : 'current');
+                if (state === 'update') updateCount++;
+
+                const card = document.createElement('div');
+                card.className = 'lesson-card';
+                card.style.cssText = 'display:flex;flex-direction:column;gap:6px;padding:10px;';
+                const badge = state === 'update'
+                    ? `<span style="color:#e5c07b;font-size:9px;font-weight:600">UPDATE → v${escapeHtml(cl.version)}</span>`
+                    : state === 'current'
+                        ? '<span style="color:#4ec9b0;font-size:9px;font-weight:600">✓ INSTALLED</span>'
+                        : `<span style="color:var(--text-muted);font-size:9px">v${escapeHtml(cl.version)}</span>`;
+                card.innerHTML = `
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:6px">
+                        <div class="lesson-card-title" style="font-size:12px;font-weight:600">${escapeHtml(cl.title)}</div>
+                        ${badge}
+                    </div>
+                    <div style="font-size:10px;color:var(--text-muted)">${escapeHtml(cl.difficulty || 'beginner')} · ${escapeHtml(cl.author || 'Unknown')}</div>
+                    <div style="font-size:10px;color:var(--text-dim)">${escapeHtml(cl.description || '')}</div>`;
+
+                if (state !== 'current') {
+                    const btn = document.createElement('button');
+                    btn.className = 'learn-action-btn';
+                    btn.style.cssText = 'align-self:flex-start;font-size:10px;padding:4px 10px;margin-top:2px';
+                    btn.textContent = state === 'update' ? `Update to v${cl.version}` : 'Download';
+                    btn.addEventListener('click', () => downloadCloudLesson(cl.id, btn));
+                    card.appendChild(btn);
+                }
+                cloudGrid.appendChild(card);
+            }
+
+            const cloudSection = document.createElement('div');
+            cloudSection.className = 'learn-section';
+            cloudSection.innerHTML = `<div class="learn-section-title">☁ CLOUD LESSONS${updateCount > 0 ? ` <span style="color:#e5c07b">(${updateCount} update${updateCount > 1 ? 's' : ''} available)</span>` : ''}</div>`;
+            cloudSection.appendChild(cloudGrid);
+            panel.appendChild(cloudSection);
+        }
+    } catch { /* offline or server unreachable — skip the cloud section quietly */ }
+
+    // ── Curriculum (built-in interactive lessons) ──
+    const curriculum = lessonSystem.getActiveCurriculum();
+    if (curriculum && curriculum.modules.length) {
+        let totalLessons = 0, doneLessons = 0;
+        for (const m of curriculum.modules) for (const l of m.lessons) {
+            totalLessons++;
+            if (learningProfile.getLessonProgress(l.id)?.completed) doneLessons++;
+        }
+
+        const curSection = document.createElement('div');
+        curSection.className = 'learn-section';
+        curSection.innerHTML = `<div class="learn-section-title">CURRICULUM <span style="color:var(--text-muted)">(${doneLessons}/${totalLessons} lessons)</span></div>`;
+
+        for (const mod of curriculum.modules) {
+            const modLabel = document.createElement('div');
+            modLabel.style.cssText = 'font-size:10px;font-weight:600;letter-spacing:.04em;color:var(--text-muted);margin:10px 0 3px';
+            modLabel.textContent = mod.title.toUpperCase();
+            curSection.appendChild(modLabel);
+
+            for (const lesson of mod.lessons) {
+                const lp = learningProfile.getLessonProgress(lesson.id);
+                const done = !!lp?.completed, started = !!lp?.started;
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:5px;cursor:pointer;font-size:11.5px';
+                row.innerHTML = `<span style="color:${done ? '#4ec9b0' : started ? '#e5c07b' : 'var(--text-muted)'};width:12px;text-align:center">${done ? '✓' : started ? '◐' : '○'}</span>
+                    <span style="flex:1;color:var(--text)">${escapeHtml(lesson.title)}</span>
+                    <span style="color:var(--text-muted);font-size:9px">${lesson.estimatedMinutes}m · ${escapeHtml(lesson.difficulty)}</span>`;
+                row.addEventListener('mouseenter', () => row.style.background = 'rgba(255,255,255,0.05)');
+                row.addEventListener('mouseleave', () => row.style.background = '');
+                row.addEventListener('click', () => openLessonViewer(mod.id, lesson.id));
+                curSection.appendChild(row);
+            }
+        }
+        panel.appendChild(curSection);
+    }
 
     // ── Action Buttons ──
     const actionsSection = document.createElement('div');
@@ -4376,6 +5095,7 @@ initProjectExport({
 });
 menuAction('menu-export', exportProject);
 menuAction('menu-import', importProject);
+menuAction('menu-import-vs', importFromVisualStudio);
 menuAction('menu-upload-doc', uploadDocument);
 
 // ══════════════════════════════════════
@@ -4520,6 +5240,14 @@ initStudy({
     getUserSettings: () => userSettings,
     renderLearnPanel,
     tutorOnQuizFail,
+    // Feed quiz results into the adaptive profile and push to the cloud (debounced).
+    recordLearning: (conceptId: string, type: 'lesson' | 'exercise' | 'quiz' | 'chat', successful: boolean) => {
+        try {
+            learningProfile.recordInteraction(conceptId, type, successful, 0);
+            learningProfile.save();
+            scheduleProgressSync();
+        } catch {}
+    },
 });
 initStudyButtons();
 
@@ -4668,6 +5396,7 @@ async function init() {
 
     // Phase 2: Initialize adaptive learning system
     learningProfile.load();           // Load saved mastery progress from disk
+    lessonSystem.loadXbox360Curriculum(); // Load the built-in curriculum for the lesson viewer
     // Cinematic tutor is loaded on-demand when the user opens it
     learningProfile.startSession();   // Start tracking learning time
 
@@ -4718,9 +5447,24 @@ async function init() {
     const authUser = await authService.init();
     // Show username in titlebar
     updateTitlebarUser();
-    // Pull cloud settings if logged in
+    // Pull cloud settings + learning progress if logged in
     if (authUser) {
         pullCloudSettings();
+        pullCloudProgress();
+    }
+
+    // Notify if any installed cinematic lessons have a newer version in the cloud.
+    countLessonUpdates().then(n => {
+        if (n > 0) appendOutput(`📚 ${n} cinematic lesson update${n > 1 ? 's' : ''} available — open the Learn panel (☁ Cloud Lessons).\n`);
+    }).catch(() => {});
+
+    // Startup prompts. A signed-in user is only ever interrupted by a new
+    // release; a signed-out user is asked about their account first, and the
+    // release popup waits until they've answered so the two never stack.
+    if (authUser) {
+        setTimeout(() => { checkForUpdates(); }, 2500);
+    } else {
+        setTimeout(() => { showAccountPrompt(() => { checkForUpdates(); }); }, 900);
     }
 
     // Render community panel AFTER auth is initialized so it knows login state
@@ -4739,8 +5483,8 @@ async function init() {
     // Listen for future auth changes (login/logout during this session)
     authService.onAuthStateChange((user: any) => {
         updateTitlebarUser();
-        // Pull cloud settings when user logs in
-        if (user) pullCloudSettings();
+        // Pull cloud settings + progress when user logs in
+        if (user) { pullCloudSettings(); pullCloudProgress(); }
         // Re-render community panel on login/logout
         renderCommunityPanel();
     });

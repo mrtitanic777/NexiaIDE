@@ -25,7 +25,7 @@ export function showXexInspector(data: any) {
     if (!xexInspectorContainer) {
         xexInspectorContainer = document.createElement('div');
         xexInspectorContainer.id = 'xex-inspector';
-        $('ctx.editor-area').appendChild(xexInspectorContainer);
+        $('editor-area').appendChild(xexInspectorContainer);
     }
 
     // Add as a pseudo-tab
@@ -38,7 +38,7 @@ export function showXexInspector(data: any) {
 
     // Create a dummy model (won't be used by Monaco)
     const monaco = (window as any).monaco;
-    const model = monaco?.ctx.editor?.createModel?.('', 'plaintext') || { dispose: () => {}, getValue: () => '' };
+    const model = monaco?.editor?.createModel?.('', 'plaintext') || { dispose: () => {}, getValue: () => '' };
 
     ctx.openTabs.push({ path: tabPath, name: `🔍 ${data.fileName || 'XEX Inspector'}`, model, modified: false });
     switchToXexTab(tabPath, data);
@@ -46,8 +46,8 @@ export function showXexInspector(data: any) {
 
 export function switchToXexTab(tabPath: string, data: any) {
     ctx.activeTab = tabPath;
-    // Hide Monaco ctx.editor, show XEX inspector
-    $('ctx.editor-container').style.display = 'none';
+    // Hide Monaco editor, show XEX inspector
+    $('editor-container').style.display = 'none';
     $('welcome-screen').style.display = 'none';
     if (xexInspectorContainer) {
         xexInspectorContainer.style.display = 'block';

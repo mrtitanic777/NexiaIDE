@@ -73,10 +73,16 @@ interface AIMessage {
     role: 'user' | 'assistant' | 'system';
     content: string;
     timestamp: number;
+    id?: number;
 }
 
 let aiMessages: AIMessage[] = [];
 let aiStreaming = false;
+// Monotonic id stamped on each message and its DOM node so we can match a
+// message to its exact DOM element by identity rather than by text content
+// (duplicate prompts would otherwise delete the wrong node — see retryAIMessage).
+let aiMsgIdSeq = 0;
+function nextAIMsgId(): number { return ++aiMsgIdSeq; }
 
 // ── AI networking via Node's https (bypasses CSP, uses exact URLs) ──
 const nodeHttps = require('https');
@@ -131,13 +137,14 @@ function aiRequest(url: string, body: any, apiKey?: string): Promise<any> {
     });
 }
 
-function aiRequestRaw(url: string, body: any, headers: Record<string, string>): Promise<any> {
+function aiRequestRaw(url: string, body: any, headers: Record<string, string>, onRequest?: (req: any) => void): Promise<any> {
     return new Promise((resolve, reject) => {
         const parsed = new URL(url);
         const isHttps = parsed.protocol === 'https:';
         const lib = isHttps ? nodeHttps : nodeHttp;
         const postData = JSON.stringify(body);
         headers['Content-Length'] = Buffer.byteLength(postData).toString();
+        let aborted = false;
         const req = lib.request({
             hostname: parsed.hostname, port: parsed.port || (isHttps ? 443 : 80),
             path: parsed.pathname + parsed.search, method: 'POST', headers,
@@ -145,13 +152,18 @@ function aiRequestRaw(url: string, body: any, headers: Record<string, string>): 
             let data = '';
             res.on('data', (chunk: string) => data += chunk);
             res.on('end', () => {
+                if (aborted) return;
                 if (res.statusCode >= 400) { reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 300)}`)); return; }
                 try { resolve(JSON.parse(data)); }
                 catch { reject(new Error('Invalid JSON response: ' + data.substring(0, 200))); }
             });
         });
-        req.on('error', reject);
-        req.setTimeout(120000, () => { req.destroy(); reject(new Error('Request timeout')); });
+        req.on('error', (err: Error) => { if (!aborted) reject(err); });
+        req.setTimeout(120000, () => { req.destroy(); if (!aborted) reject(new Error('Request timeout')); });
+        // Expose the in-flight request so callers can abort it. Wrapping the
+        // request object lets the caller call req.destroy() and mark this aborted
+        // so the stale onError/onEnd handlers don't reject after cancellation.
+        if (onRequest) onRequest({ destroy: () => { aborted = true; req.destroy(new Error('aborted')); } });
         req.write(postData); req.end();
     });
 }
@@ -178,6 +190,24 @@ function aiStreamSSE(
     let finished = false;
 
     const finish = () => { if (!finished) { finished = true; onDone(fullText); } };
+    // fail() and finish() are mutually exclusive: once either fires, the `finished`
+    // flag is latched so a late socket timeout/error can't append a spurious bubble.
+    const fail = (err: Error) => { if (!finished && !aborted) { finished = true; onError(err); } };
+
+    // Parse a single complete SSE line. Returns true if [DONE] was seen.
+    const parseLine = (line: string): boolean => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(':')) return false;
+        if (trimmed === 'data: [DONE]') return true;
+        if (trimmed.startsWith('data: ')) {
+            try {
+                const obj = JSON.parse(trimmed.slice(6));
+                const delta = obj.choices?.[0]?.delta?.content || obj.choices?.[0]?.text || '';
+                if (delta) { fullText += delta; onToken(delta); }
+            } catch {}
+        }
+        return false;
+    };
 
     const req = lib.request({
         hostname: parsed.hostname, port: parsed.port || (isHttps ? 443 : 80),
@@ -186,33 +216,31 @@ function aiStreamSSE(
         if (res.statusCode >= 400) {
             let errData = '';
             res.on('data', (c: string) => errData += c);
-            res.on('end', () => onError(new Error(`HTTP ${res.statusCode}: ${errData.substring(0, 300)}`)));
+            res.on('end', () => fail(new Error(`HTTP ${res.statusCode}: ${errData.substring(0, 300)}`)));
             return;
         }
         res.setEncoding('utf8');
         res.on('data', (chunk: string) => {
-            if (aborted) return;
+            if (aborted || finished) return;
             buffer += chunk;
             const lines = buffer.split('\n');
             buffer = lines.pop() || '';
             for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed || trimmed.startsWith(':')) continue;
-                if (trimmed === 'data: [DONE]') { finish(); return; }
-                if (trimmed.startsWith('data: ')) {
-                    try {
-                        const obj = JSON.parse(trimmed.slice(6));
-                        const delta = obj.choices?.[0]?.delta?.content || obj.choices?.[0]?.text || '';
-                        if (delta) { fullText += delta; onToken(delta); }
-                    } catch {}
-                }
+                if (parseLine(line)) { finish(); return; }
             }
         });
-        res.on('end', () => { if (!aborted) finish(); });
+        res.on('end', () => {
+            if (aborted || finished) return;
+            // Flush any trailing bytes left in the buffer when the stream ends
+            // without a final newline / [DONE] sentinel, so we don't lose the last token.
+            if (buffer.trim()) parseLine(buffer);
+            buffer = '';
+            finish();
+        });
     });
 
-    req.on('error', (err: Error) => { if (!aborted) onError(err); });
-    req.setTimeout(120000, () => { req.destroy(); if (!aborted) onError(new Error('Stream timeout')); });
+    req.on('error', (err: Error) => fail(err));
+    req.setTimeout(120000, () => { req.destroy(); fail(new Error('Stream timeout')); });
     req.write(postData); req.end();
 
     return () => { aborted = true; finished = true; req.destroy(); };
@@ -491,9 +519,15 @@ export async function sendAIMessage(userText: string, contextCode?: string) {
         headers['x-api-key'] = s.aiApiKey;
         headers['anthropic-version'] = '2023-06-01';
         body = { model: getAIModel(), max_tokens: 4096, system: getSystemPrompt(), messages: apiMessages };
-        // Anthropic streaming uses a different SSE format — fall back to non-streaming for now
+        // Anthropic streaming uses a different SSE format — fall back to non-streaming for now.
+        // The request is still cancellable: aiRequestRaw hands us the in-flight request via
+        // onRequest, which we store in aiAbortStream so the Stop button can destroy it.
+        let anthropicAborted = false;
         try {
-            const resp = await aiRequestRaw(url, body, headers);
+            const resp = await aiRequestRaw(url, body, headers, (req: any) => {
+                aiAbortStream = () => { anthropicAborted = true; req.destroy(); };
+            });
+            aiAbortStream = null;
             const reply = (resp.content || []).map((b: any) => b.text || '').join('');
             hideAITyping();
             if (reply) {
@@ -503,9 +537,15 @@ export async function sendAIMessage(userText: string, contextCode?: string) {
             }
             else { addAIMessage('system', '⚠ Empty response.'); setAIStatus('error', 'Empty'); }
         } catch (err: any) {
+            aiAbortStream = null;
             hideAITyping();
-            addAIMessage('system', `❌ Error: ${err.message}`);
-            setAIStatus('error', 'Failed');
+            // If the user pressed Stop, treat it as a clean cancellation, not an error.
+            if (anthropicAborted) {
+                setAIStatus('connected', 'Stopped');
+            } else {
+                addAIMessage('system', `❌ Error: ${err.message}`);
+                setAIStatus('error', 'Failed');
+            }
         }
         aiStreaming = false;
         ($('ai-send') as HTMLButtonElement).disabled = false;
@@ -525,9 +565,9 @@ export async function sendAIMessage(userText: string, contextCode?: string) {
 
     // Create the streaming message element
     hideAITyping();
-    const streamMsg: AIMessage = { role: 'assistant', content: '', timestamp: Date.now() };
+    const streamMsg: AIMessage = { role: 'assistant', content: '', timestamp: Date.now(), id: nextAIMsgId() };
     aiMessages.push(streamMsg);
-    const streamEl = createStreamingMessageEl();
+    const streamEl = createStreamingMessageEl(streamMsg.id!);
     const bodyEl = streamEl.querySelector('.ai-msg-body') as HTMLElement;
 
     let tokenCount = 0;
@@ -584,13 +624,14 @@ export async function sendAIMessage(userText: string, contextCode?: string) {
     );
 }
 
-function createStreamingMessageEl(): HTMLElement {
+function createStreamingMessageEl(msgId?: number): HTMLElement {
     const container = $('ai-messages');
     const welcome = container.querySelector('.ai-welcome');
     if (welcome) welcome.remove();
 
     const el = document.createElement('div');
     el.className = 'ai-msg ai-msg-streaming';
+    if (msgId != null) el.dataset.msgId = String(msgId);
     const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     el.innerHTML = `<div class="ai-msg-header"><span class="ai-msg-role assistant">Nexia AI</span><span class="ai-msg-streaming-badge">● streaming</span><span class="ai-msg-time">${time}</span></div><div class="ai-msg-body"><span class="ai-cursor-blink">▊</span></div>`;
     container.appendChild(el);
@@ -724,7 +765,7 @@ async function animateCodeIntoEditor(code: string, btn: HTMLElement) {
 
     // Mark file as modified
     const tab = ctx.openTabs.find(t => t.path === ctx.activeTab);
-    if (tab) tab.dirty = true;
+    if (tab) tab.modified = true;
 }
 
 async function animateCodeInsert(code: string, btn: HTMLElement) {
@@ -778,7 +819,7 @@ async function animateCodeInsert(code: string, btn: HTMLElement) {
     setTimeout(() => btn.textContent = originalText!, 2000);
 
     const tab = ctx.openTabs.find(t => t.path === ctx.activeTab);
-    if (tab) tab.dirty = true;
+    if (tab) tab.modified = true;
 }
 
 function saveAICodeAsFile(code: string) {
@@ -810,7 +851,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function addAIMessage(role: 'user' | 'assistant' | 'system', content: string) {
-    const msg: AIMessage = { role, content, timestamp: Date.now() };
+    const msg: AIMessage = { role, content, timestamp: Date.now(), id: nextAIMsgId() };
     aiMessages.push(msg);
     renderAIMessage(msg);
 }
@@ -859,6 +900,7 @@ function renderAIMessage(msg: AIMessage) {
 
     const el = document.createElement('div');
     el.className = 'ai-msg';
+    if (msg.id != null) el.dataset.msgId = String(msg.id);
     const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const roleLabel = msg.role === 'user' ? 'You' : msg.role === 'assistant' ? 'Nexia AI' : 'System';
 
@@ -903,14 +945,13 @@ function retryAIMessage(msg: AIMessage, msgEl: HTMLElement) {
     const userIdx = aiMessages.indexOf(userMsg);
     if (userIdx >= 0) {
         aiMessages.splice(userIdx, 1);
-        // Find and remove the user message DOM element
-        const allMsgEls = $('ai-messages').querySelectorAll('.ai-msg');
-        allMsgEls.forEach(el => {
-            const roleEl = el.querySelector('.ai-msg-role');
-            if (roleEl?.classList.contains('user') && el.querySelector('.ai-msg-body')?.textContent?.trim() === userMsg!.content.trim()) {
-                el.remove();
-            }
-        });
+        // Remove the user message DOM element by its stable stamped id, not by
+        // text content — duplicate prompts (e.g. quick-action buttons) would
+        // otherwise match and delete the wrong node.
+        if (userMsg.id != null) {
+            const userEl = $('ai-messages').querySelector(`.ai-msg[data-msg-id="${userMsg.id}"]`);
+            if (userEl) userEl.remove();
+        }
     }
 
     // Resend the original user message
@@ -1050,6 +1091,9 @@ Request: ${prompt}`;
 // ── AI Inline Suggestions ──
 
 let inlineSuggestTimer: any = null;
+// Monotonic token so overlapping in-flight completions are ignored — only the
+// latest request is allowed to show/insert a suggestion.
+let inlineSuggestToken = 0;
 
 export function triggerInlineSuggestion() {
     if (!ctx.userSettings.aiInlineSuggest || !ctx.userSettings.aiApiKey) return;
@@ -1071,16 +1115,32 @@ export function triggerInlineSuggestion() {
         // Only suggest if the line is non-empty and we're at the end
         if (!currentLine.trim() || pos.column < currentLine.length) return;
 
+        // Snapshot the request context so we can detect if the user kept typing
+        // (or moved the cursor) while the network call was in flight.
+        const reqToken = ++inlineSuggestToken;
+        const reqVersionId = model.getVersionId();
+        const reqLine = pos.lineNumber;
+        const reqColumn = pos.column;
+
         try {
             let suggestion = await aiComplete([{
                 role: 'user',
                 content: `Complete the following Xbox 360 C++ code. Return ONLY the completion (the next 1-5 lines), nothing else. No explanation.\n\n${codeAbove}`,
             }]);
 
+            // Bail if a newer request superseded this one.
+            if (reqToken !== inlineSuggestToken) return;
+            // Bail if the editor/model changed out from under us.
+            const curModel = ctx.editor?.getModel();
+            if (!curModel || curModel !== model || curModel.getVersionId() !== reqVersionId) return;
+            // Bail if the cursor moved from where the suggestion was anchored.
+            const curPos = ctx.editor?.getPosition();
+            if (!curPos || curPos.lineNumber !== reqLine || curPos.column !== reqColumn) return;
+
             suggestion = suggestion.replace(/^```[\w]*\n?/, '').replace(/\n?```$/, '').trim();
             if (!suggestion) return;
 
-            showInlineSuggestion(suggestion, pos);
+            showInlineSuggestion(suggestion, curPos);
         } catch {}
     }, 1500); // 1.5s debounce
 }

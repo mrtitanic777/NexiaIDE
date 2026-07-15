@@ -87,8 +87,10 @@ export interface OfflineAction {
 
 // ── Configuration ──
 
-const DEFAULT_SERVER_URL = 'http://138.197.25.107:3500';
+const DEFAULT_SERVER_URL = 'https://auth.logansreplicas.com';
 const TOKEN_STORAGE_KEY = 'nexia_auth_token';
+const SERVER_URL_FILE = '.nexia-ide-server.json';
+const ACCOUNT_FILE = '.nexia-ide-account.json';
 
 const PULSE_INTERVAL = 60 * 1000;         // 60 seconds
 const PULSE_TIMEOUT = 8000;               // 8 second timeout
@@ -148,6 +150,86 @@ function storeToken(token: string | null) {
             if (fs.existsSync(tokenFile)) fs.unlinkSync(tokenFile);
         }
     } catch {}
+}
+
+/**
+ * Remember who was last signed in — deliberately kept separate from the token
+ * so an expired/cleared token doesn't erase the identity. This is what lets the
+ * app say "you were last signed in as X" instead of forgetting you entirely.
+ * Contains no secrets — just a username/email for the welcome-back prompt.
+ */
+export interface LastAccount { username: string; email: string; role?: string; savedAt: number; }
+
+function storeLastAccount(user: NexiaUser | null) {
+    if (!user) return;
+    try {
+        const fs = require('fs');
+        const os = require('os');
+        const path = require('path');
+        fs.writeFileSync(
+            path.join(os.homedir(), ACCOUNT_FILE),
+            JSON.stringify({ username: user.username, email: user.email, role: user.role, savedAt: Date.now() }, null, 2)
+        );
+    } catch {}
+}
+
+/** The last account that was signed in on this machine, if any. */
+export function getLastAccount(): LastAccount | null {
+    try {
+        const fs = require('fs');
+        const os = require('os');
+        const path = require('path');
+        const f = path.join(os.homedir(), ACCOUNT_FILE);
+        if (fs.existsSync(f)) {
+            const d = JSON.parse(fs.readFileSync(f, 'utf8'));
+            if (d && d.username) return d;
+        }
+    } catch {}
+    return null;
+}
+
+/** Forget the remembered account (used by "continue without an account"). */
+export function clearLastAccount() {
+    try {
+        const fs = require('fs');
+        const os = require('os');
+        const path = require('path');
+        const f = path.join(os.homedir(), ACCOUNT_FILE);
+        if (fs.existsSync(f)) fs.unlinkSync(f);
+    } catch {}
+}
+
+function getStoredServerUrl(): string | null {
+    try {
+        const fs = require('fs');
+        const os = require('os');
+        const path = require('path');
+        const file = path.join(os.homedir(), SERVER_URL_FILE);
+        if (fs.existsSync(file)) {
+            const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+            return (typeof data.serverUrl === 'string' && data.serverUrl) ? data.serverUrl : null;
+        }
+    } catch {}
+    return null;
+}
+
+function storeServerUrl(url: string | null) {
+    try {
+        const fs = require('fs');
+        const os = require('os');
+        const path = require('path');
+        const file = path.join(os.homedir(), SERVER_URL_FILE);
+        if (url) {
+            fs.writeFileSync(file, JSON.stringify({ serverUrl: url }, null, 2));
+        } else if (fs.existsSync(file)) {
+            fs.unlinkSync(file);
+        }
+    } catch {}
+}
+
+/** Trim whitespace and strip any trailing slash so `_serverUrl + '/api/...'` never double-slashes. */
+function normalizeServerUrl(url: string): string {
+    return String(url).trim().replace(/\/+$/, '');
 }
 
 function notifyListeners() {
@@ -509,8 +591,35 @@ export function getServerUrl(): string {
     return _serverUrl;
 }
 
+/** Get the compiled-in default server URL (used to offer a "reset" in the UI). */
+export function getDefaultServerUrl(): string {
+    return DEFAULT_SERVER_URL;
+}
+
+/**
+ * Set and persist the auth/lesson server URL. Takes effect immediately for
+ * all subsequent requests; persisted to ~/.nexia-ide-server.json so it
+ * survives restarts. Pass null/empty to clear the override and fall back to
+ * the compiled-in default. Returns the normalized URL now in effect.
+ */
+export function setServerUrl(url: string | null): string {
+    const normalized = url ? normalizeServerUrl(url) : '';
+    if (normalized) {
+        _serverUrl = normalized;
+        storeServerUrl(normalized);
+    } else {
+        _serverUrl = DEFAULT_SERVER_URL;
+        storeServerUrl(null);
+    }
+    return _serverUrl;
+}
+
 /** Initialize auth — loads stored token, validates it, starts pulse. */
 export async function init(): Promise<NexiaUser | null> {
+    // Apply a user-configured server URL (if any) before the first request.
+    const storedUrl = getStoredServerUrl();
+    if (storedUrl) _serverUrl = normalizeServerUrl(storedUrl);
+
     _token = getStoredToken();
     loadOfflineQueue();
 
@@ -524,6 +633,7 @@ export async function init(): Promise<NexiaUser | null> {
     const result = await apiFetch('/api/auth/me');
     if (result.success && result.user) {
         _user = result.user;
+        storeLastAccount(_user);
         startRefreshTimer();
         startPulse();
         notifyListeners();
@@ -550,6 +660,7 @@ export async function register(username: string, email: string, password: string
         _token = result.token;
         _user = result.user;
         storeToken(_token);
+        storeLastAccount(_user);
         startRefreshTimer();
         notifyListeners();
     }
@@ -567,6 +678,7 @@ export async function login(email: string, password: string): Promise<AuthResult
         _token = result.token;
         _user = result.user;
         storeToken(_token);
+        storeLastAccount(_user);
         startRefreshTimer();
         startPulse();
         notifyListeners();
@@ -728,11 +840,29 @@ export async function deleteCloudLesson(id: string): Promise<{ success: boolean;
     return apiFetch('/api/lessons/' + id, { method: 'DELETE' });
 }
 
+// ── Releases (software updates) ──
+
+/** Fetch the currently published release manifest (public). */
+export async function getLatestRelease(): Promise<{ success: boolean; update?: any; error?: string }> {
+    return apiFetch('/api/updates/latest');
+}
+
+/** Publish a release — this is the "push" that notifies every client. Admin only. */
+export async function publishRelease(manifest: any): Promise<{ success: boolean; update?: any; error?: string }> {
+    return apiFetch('/api/updates/latest', { method: 'PUT', body: JSON.stringify(manifest) });
+}
+
+/** Pull the current release so clients stop being prompted. Admin only. */
+export async function clearRelease(): Promise<{ success: boolean; error?: string }> {
+    return apiFetch('/api/updates/latest', { method: 'DELETE' });
+}
+
 // ── Server Health ──
 
-export async function checkServerHealth(): Promise<{ online: boolean; version?: string }> {
+export async function checkServerHealth(overrideUrl?: string): Promise<{ online: boolean; version?: string }> {
     try {
-        const resp = await fetch(_serverUrl + '/api/health', { signal: AbortSignal.timeout(5000) });
+        const base = overrideUrl ? normalizeServerUrl(overrideUrl) : _serverUrl;
+        const resp = await fetch(base + '/api/health', { signal: AbortSignal.timeout(5000) });
         if (resp.ok) {
             const data = await resp.json();
             return { online: true, version: data.version };
@@ -811,6 +941,37 @@ export async function saveCloudSettings(settings: CloudSettings): Promise<boolea
     const result = await apiFetch('/api/user/settings', {
         method: 'PUT',
         body: JSON.stringify({ settings }),
+    });
+    return result.success === true;
+}
+
+/**
+ * Load the learning-profile snapshot from the cloud.
+ * Returns null if not logged in or the request fails.
+ */
+export async function loadCloudProgress(): Promise<{ progress: any; updatedAt: string | null } | null> {
+    if (!_token) return null;
+    const result = await apiFetch('/api/auth/progress');
+    if (result.success) {
+        return { progress: result.progress || null, updatedAt: result.updatedAt || null };
+    }
+    return null;
+}
+
+/**
+ * Save the learning-profile snapshot to the cloud.
+ * If offline, the write is queued and replayed on reconnect. Returns true if
+ * the write reached the server now (queued writes return false but persist).
+ */
+export async function saveCloudProgress(data: any): Promise<boolean> {
+    if (!_token) return false;
+    if (_connectionState.offlineMode) {
+        queueOfflineAction('custom', { endpoint: '/api/auth/progress', method: 'PUT', data: { data } });
+        return false;
+    }
+    const result = await apiFetch('/api/auth/progress', {
+        method: 'PUT',
+        body: JSON.stringify({ data }),
     });
     return result.success === true;
 }

@@ -4,7 +4,7 @@
  * repo browsing, clone, and token-authenticated push/pull.
  */
 
-const { execSync, spawn: nodeSpawn } = require('child_process');
+const { execSync, execFileSync, spawn: nodeSpawn } = require('child_process');
 const nodeFs = require('fs');
 const nodePath = require('path');
 const nodeOs = require('os');
@@ -319,6 +319,20 @@ function getAuthenticatedRemoteUrl(url: string): string {
     return url;
 }
 
+// Remove any credentials from text before it is shown in the UI. Git error
+// messages echo the remote URL — which may contain https://TOKEN@host — so we
+// scrub both the known token and any generic userinfo (https://...@) component.
+function scrubSecret(text: string): string {
+    if (!text) return text;
+    let out = String(text);
+    if (ghConfig?.token) {
+        out = out.split(ghConfig.token).join('***');
+    }
+    // Generic: replace the userinfo in any URL (scheme://user:pass@host → scheme://***@host)
+    out = out.replace(/(https?:\/\/)[^/@\s]+@/gi, '$1***@');
+    return out;
+}
+
 function logoutGitHub() {
     ghConfig = null;
     ghRepoCache = [];
@@ -337,6 +351,19 @@ function gitExec(cmd: string, cwd?: string): string {
         return execSync(cmd, { cwd: dir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     } catch (err: any) {
         throw new Error(err.stderr?.trim() || err.message);
+    }
+}
+
+// Run git with an explicit argv array via execFileSync — no shell is spawned, so
+// a token-bearing URL passed as an argument is never re-parsed by a shell. Any
+// error text is scrubbed of credentials before it propagates to the UI.
+function gitExecArgs(args: string[], cwd?: string): string {
+    const dir = cwd || _getCurrentProject()?.path;
+    if (!dir) throw new Error('No project open');
+    try {
+        return execFileSync('git', args, { cwd: dir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    } catch (err: any) {
+        throw new Error(scrubSecret(err.stderr?.trim() || err.message));
     }
 }
 
@@ -362,13 +389,30 @@ function hasCommits(): boolean {
 
 interface FileChange { status: string; staged: boolean; file: string; }
 
+// Git wraps paths containing special chars (spaces, unicode, etc.) in double
+// quotes and C-escapes them. Strip the surrounding quotes so the UI shows a
+// clean path. (We only unquote; full C-unescaping isn't needed for display.)
+function unquoteGitPath(p: string): string {
+    if (p.length >= 2 && p[0] === '"' && p[p.length - 1] === '"') {
+        return p.slice(1, -1);
+    }
+    return p;
+}
+
 function getChangedFiles(): FileChange[] {
     try {
         const raw = gitExec('git status --porcelain');
         if (!raw) return [];
         const results: FileChange[] = [];
         for (const line of raw.split('\n').filter(Boolean)) {
-            const ix = line[0], wt = line[1], file = line.substring(3);
+            const ix = line[0], wt = line[1];
+            let pathPart = line.substring(3);
+            // Renames/copies are reported as "old -> new"; track the new path.
+            const arrowIdx = pathPart.indexOf(' -> ');
+            if (arrowIdx >= 0) {
+                pathPart = pathPart.substring(arrowIdx + 4);
+            }
+            const file = unquoteGitPath(pathPart);
             if (ix !== ' ' && ix !== '?') results.push({ status: ix, staged: true, file });
             if (wt !== ' ' || ix === '?') results.push({ status: wt === '?' ? '?' : wt, staged: false, file });
         }
@@ -381,6 +425,7 @@ function getStatusClass(s: string): string {
         case 'M': return 'git-modified';
         case 'A': case '?': return 'git-added';
         case 'D': return 'git-deleted';
+        case 'R': case 'C': return 'git-renamed';
         case 'U': return 'git-conflict';
         default: return 'git-modified';
     }
@@ -942,7 +987,10 @@ function wireGitEvents(panel: HTMLElement) {
     // Tab switching
     panel.querySelectorAll('.git-tab').forEach((btn: any) => {
         btn.addEventListener('click', () => {
-            ghView = btn.dataset.view === 'github' ? (ghConfig ? 'github' : 'github') : 'local';
+            // When the GitHub tab is selected we always switch to the 'github' view;
+            // renderGitHubView() itself falls back to the sign-in landing page when
+            // ghConfig is absent. (Previously both ternary branches were 'github'.)
+            ghView = btn.dataset.view === 'github' ? 'github' : 'local';
             renderGitPanel();
         });
     });
@@ -1297,8 +1345,8 @@ function doPush() {
 
     try {
         if (authRemote !== remote && remote) {
-            // Use authenticated URL temporarily
-            gitExec(`git push ${authRemote}`);
+            // Use authenticated URL temporarily — passed as a discrete argv arg (no shell).
+            gitExecArgs(['push', authRemote]);
         } else {
             gitExec('git push');
         }
@@ -1307,13 +1355,13 @@ function doPush() {
         try {
             const b = getCurrentBranch();
             if (authRemote !== remote && remote) {
-                gitExec(`git push -u ${authRemote} ${b}`);
+                gitExecArgs(['push', '-u', authRemote, b]);
             } else {
                 gitExec(`git push -u origin ${b}`);
             }
             showGitToast('Push complete (upstream set)', 'success');
         } catch (err2: any) {
-            showGitToast(`Push failed: ${err2.message}`, 'error');
+            showGitToast(scrubSecret(`Push failed: ${err2.message}`), 'error');
         }
     }
 }
@@ -1325,14 +1373,15 @@ function doPull() {
 
     try {
         if (authRemote !== remote && remote) {
-            gitExec(`git pull ${authRemote}`);
+            // Authenticated URL passed as a discrete argv arg (no shell).
+            gitExecArgs(['pull', authRemote]);
         } else {
             gitExec('git pull');
         }
         showGitToast('Pull complete', 'success');
         renderGitPanel();
     } catch (err: any) {
-        showGitToast(`Pull failed: ${err.message}`, 'error');
+        showGitToast(scrubSecret(`Pull failed: ${err.message}`), 'error');
     }
 }
 
@@ -1619,11 +1668,13 @@ function doClone() {
     if (!url) { showGitToast('Enter a repository URL', 'error'); return; }
     if (!dir) { showGitToast('Choose a directory', 'error'); return; }
 
+    // Derive the repo name from the original (token-free) URL so the token never
+    // ends up in a directory path.
+    const repoName = url.replace(/\.git$/, '').split('/').pop() || 'repo';
+
     // Use authenticated URL if available
     url = getAuthenticatedRemoteUrl(url);
 
-    // Extract repo name for subfolder
-    const repoName = url.replace(/\.git$/, '').split('/').pop() || 'repo';
     const targetDir = nodePath.join(dir, repoName);
 
     const statusEl = _$('gh-clone-status');
@@ -1637,7 +1688,8 @@ function doClone() {
         if (!nodeFs.existsSync(dir)) {
             nodeFs.mkdirSync(dir, { recursive: true });
         }
-        execSync(`git clone "${url}" "${targetDir}"`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+        // execFileSync with an argv array — no shell, so the token URL is never re-parsed.
+        execFileSync('git', ['clone', url, targetDir], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
         showGitToast(`Cloned to ${repoName}!`, 'success');
         if (statusEl) { statusEl.textContent = `✓ Cloned to: ${targetDir}`; statusEl.className = 'gh-clone-status gh-clone-success'; }
 
@@ -1654,8 +1706,9 @@ function doClone() {
             }
         }, 100);
     } catch (err: any) {
-        showGitToast(`Clone failed: ${err.message}`, 'error');
-        if (statusEl) { statusEl.textContent = `✗ ${err.message}`; statusEl.className = 'gh-clone-status gh-clone-error'; }
+        const safeMsg = scrubSecret(err.message);
+        showGitToast(`Clone failed: ${safeMsg}`, 'error');
+        if (statusEl) { statusEl.textContent = `✗ ${safeMsg}`; statusEl.className = 'gh-clone-status gh-clone-error'; }
     }
     if (btn) { btn.disabled = false; btn.textContent = 'Clone Repository'; }
 }
@@ -1722,11 +1775,11 @@ function showNewRepoDialog() {
                 }
                 try { gitExec('git remote remove origin'); } catch {}
                 try { gitExec(`git remote add origin ${repo.clone_url}`); } catch {}
-                // Push
+                // Push — token URL passed as a discrete argv arg (no shell).
                 try {
                     const authUrl = getAuthenticatedRemoteUrl(repo.clone_url);
                     const branch = getCurrentBranch();
-                    gitExec(`git push -u ${authUrl} ${branch}`);
+                    gitExecArgs(['push', '-u', authUrl, branch]);
                     showGitToast('Pushed to new repo!', 'success');
                 } catch {}
             }

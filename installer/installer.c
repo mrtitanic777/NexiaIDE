@@ -989,6 +989,43 @@ BOOL NxIns_FindPayload(void)
     return TRUE;
 }
 
+/* ── Reject unsafe extraction paths (path traversal / absolute paths) ──
+ * Returns TRUE if the relative path is safe to extract. Rejects:
+ *   - empty paths
+ *   - absolute paths (leading '\' or '/', or drive-letter "X:")
+ *   - any path containing a ".." component
+ */
+static BOOL sNxIns_IsPathSafe(const WCHAR *relPath)
+{
+    if (!relPath || relPath[0] == L'\0')
+        return FALSE;
+
+    /* Absolute path: leading separator */
+    if (relPath[0] == L'\\' || relPath[0] == L'/')
+        return FALSE;
+
+    /* Absolute path: drive letter "X:" */
+    if (((relPath[0] >= L'A' && relPath[0] <= L'Z') ||
+         (relPath[0] >= L'a' && relPath[0] <= L'z')) &&
+        relPath[1] == L':')
+        return FALSE;
+
+    /* Scan for ".." path components (bounded by separators or string ends) */
+    {
+        const WCHAR *p = relPath;
+        while (*p) {
+            /* Are we at the start of a component? (begin of string or after a separator) */
+            BOOL atCompStart = (p == relPath) || (p[-1] == L'\\') || (p[-1] == L'/');
+            if (atCompStart && p[0] == L'.' && p[1] == L'.' &&
+                (p[2] == L'\\' || p[2] == L'/' || p[2] == L'\0'))
+                return FALSE;
+            p++;
+        }
+    }
+
+    return TRUE;
+}
+
 BOOL NxIns_ExtractPayload(void)
 {
     if (!g_ins.payloadFound) return FALSE;
@@ -999,6 +1036,34 @@ BOOL NxIns_ExtractPayload(void)
 
     DWORD bytesRead;
     DWORD fileCount = g_ins.payloadHeader.fileCount;
+
+    /* Sanity-bound fileCount to defend against a corrupt/hostile payload:
+     * reject absurd counts and any value whose entry-table size would
+     * overflow a 32-bit DWORD or exceed the actual EXE size. */
+    {
+        DWORD fileSizeHigh = 0;
+        DWORD fileSizeLow = GetFileSize(hFile, &fileSizeHigh);
+        ULONGLONG totalFileSize = ((ULONGLONG)fileSizeHigh << 32) | fileSizeLow;
+
+        if (fileCount == 0 || fileCount > 1000000) {
+            NxIns_SetStatus(L"Error: payload file count out of range.");
+            CloseHandle(hFile);
+            return FALSE;
+        }
+        /* fileCount * sizeof(NxInsFileEntry) must not overflow DWORD */
+        if (fileCount > (0xFFFFFFFFu / sizeof(NxInsFileEntry))) {
+            NxIns_SetStatus(L"Error: payload entry table too large.");
+            CloseHandle(hFile);
+            return FALSE;
+        }
+        /* Entry table must fit within the file. */
+        if ((ULONGLONG)g_ins.payloadOffset + sizeof(NxInsPayloadHeader) +
+            (ULONGLONG)fileCount * sizeof(NxInsFileEntry) > totalFileSize) {
+            NxIns_SetStatus(L"Error: payload entry table exceeds file size.");
+            CloseHandle(hFile);
+            return FALSE;
+        }
+    }
 
     /* Seek past the payload header to the file entry table */
     DWORD entryTableOffset = g_ins.payloadOffset + sizeof(NxInsPayloadHeader);
@@ -1022,6 +1087,15 @@ BOOL NxIns_ExtractPayload(void)
         if (g_ins.installCancelled) break;
 
         NxInsFileEntry *fe = &entries[i];
+
+        /* Defend against path traversal: ensure the relative path is bounded
+         * (NUL-terminated) and contains no ".." / absolute components, else
+         * skip this entry with a logged warning. */
+        fe->relativePath[259] = L'\0';
+        if (!sNxIns_IsPathSafe(fe->relativePath)) {
+            NxIns_SetStatus(L"Warning: skipping unsafe path: %s", fe->relativePath);
+            continue;
+        }
 
         /* Build full output path */
         WCHAR outPath[NXI_MAX_PATH];
@@ -1048,39 +1122,55 @@ BOOL NxIns_ExtractPayload(void)
         if (fe->compressedSize > 0 && fe->compressedSize != fe->dataSize) {
             /* Compressed file (chunked format v2) — read chunk count, decompress each */
             DWORD chunkCount = 0;
-            ReadFile(hFile, &chunkCount, 4, &bytesRead, NULL);
+            if (!ReadFile(hFile, &chunkCount, 4, &bytesRead, NULL) || bytesRead != 4)
+                chunkCount = 0;  /* corrupt header — extract nothing for this file */
 
             for (DWORD c = 0; c < chunkCount; c++) {
                 DWORD compChunkSize = 0, origChunkSize = 0;
-                ReadFile(hFile, &compChunkSize, 4, &bytesRead, NULL);
-                ReadFile(hFile, &origChunkSize, 4, &bytesRead, NULL);
+                /* Read both size fields; bail on any read failure / short read. */
+                if (!ReadFile(hFile, &compChunkSize, 4, &bytesRead, NULL) || bytesRead != 4)
+                    break;
+                if (!ReadFile(hFile, &origChunkSize, 4, &bytesRead, NULL) || bytesRead != 4)
+                    break;
 
                 BYTE *compBuf = (BYTE *)malloc(compChunkSize);
                 BYTE *decompBuf = (BYTE *)malloc(origChunkSize);
 
-                if (compBuf && decompBuf) {
-                    ReadFile(hFile, compBuf, compChunkSize, &bytesRead, NULL);
+                if (!compBuf || !decompBuf) {
+                    /* Alloc failed — abort this file cleanly rather than skipping
+                     * only the read (which would misalign the file pointer). */
+                    if (compBuf) free(compBuf);
+                    if (decompBuf) free(decompBuf);
+                    break;
+                }
 
-                    if (compChunkSize == origChunkSize) {
-                        /* Stored raw (compression failed for this chunk) */
-                        DWORD written;
-                        WriteFile(hOut, compBuf, compChunkSize, &written, NULL);
+                if (!ReadFile(hFile, compBuf, compChunkSize, &bytesRead, NULL) ||
+                    bytesRead != compChunkSize) {
+                    /* Truncated compressed data — abort this file. */
+                    free(compBuf);
+                    free(decompBuf);
+                    break;
+                }
+
+                if (compChunkSize == origChunkSize) {
+                    /* Stored raw (compression failed for this chunk) */
+                    DWORD written;
+                    WriteFile(hOut, compBuf, compChunkSize, &written, NULL);
+                } else {
+                    uLongf decompSize = (uLongf)origChunkSize;
+                    int zret = uncompress(decompBuf, &decompSize, compBuf, (uLong)compChunkSize);
+
+                    DWORD written;
+                    if (zret == Z_OK) {
+                        WriteFile(hOut, decompBuf, (DWORD)decompSize, &written, NULL);
                     } else {
-                        uLongf decompSize = (uLongf)origChunkSize;
-                        int zret = uncompress(decompBuf, &decompSize, compBuf, (uLong)compChunkSize);
-
-                        DWORD written;
-                        if (zret == Z_OK) {
-                            WriteFile(hOut, decompBuf, (DWORD)decompSize, &written, NULL);
-                        } else {
-                            /* Decompression failed — write raw as fallback */
-                            WriteFile(hOut, compBuf, compChunkSize, &written, NULL);
-                        }
+                        /* Decompression failed — write raw as fallback */
+                        WriteFile(hOut, compBuf, compChunkSize, &written, NULL);
                     }
                 }
 
-                if (compBuf) free(compBuf);
-                if (decompBuf) free(decompBuf);
+                free(compBuf);
+                free(decompBuf);
             }
         } else {
             /* Uncompressed file — copy raw in chunks */
@@ -1088,7 +1178,10 @@ BOOL NxIns_ExtractPayload(void)
 
             while (remaining > 0) {
                 DWORD chunk = (remaining > 65536) ? 65536 : remaining;
-                ReadFile(hFile, copyBuf, chunk, &bytesRead, NULL);
+                /* Bail on read failure or short/zero read (truncated payload)
+                 * to avoid an infinite loop (remaining never decreases). */
+                if (!ReadFile(hFile, copyBuf, chunk, &bytesRead, NULL) || bytesRead == 0)
+                    break;
 
                 DWORD written;
                 WriteFile(hOut, copyBuf, bytesRead, &written, NULL);
@@ -1599,6 +1692,13 @@ static FNFDINOTIFY(sNxiFdiNotify)
         for (WCHAR *p = widePath; *p; p++)
             if (*p == L'/') *p = L'\\';
 
+        /* Defend against path traversal / absolute paths in the cab entry.
+         * Return 0 to skip this file without aborting the whole cabinet. */
+        if (!sNxIns_IsPathSafe(widePath)) {
+            NxIns_SetStatus(L"Warning: skipping unsafe cab path: %s", widePath);
+            return 0;
+        }
+
         /* Build full output path */
         WCHAR fullPath[NXI_MAX_PATH];
         _snwprintf(fullPath, NXI_MAX_PATH, L"%s\\%s",
@@ -1850,7 +1950,10 @@ BOOL NxIns_ExtractSdk(void)
         while (remaining > 0) {
             DWORD chunk = (remaining > (256 * 1024)) ? (256 * 1024) : remaining;
             DWORD br, wr;
-            ReadFile(hFile, ioBuf, chunk, &br, NULL);
+            /* Bail on read failure or short/zero read (truncated installer)
+             * to avoid an infinite loop (remaining never decreases). */
+            if (!ReadFile(hFile, ioBuf, chunk, &br, NULL) || br == 0)
+                break;
             WriteFile(hCab, ioBuf, br, &wr, NULL);
             remaining -= br;
             cabWritten += br;
@@ -2816,8 +2919,13 @@ BOOL NxIns_Init(HINSTANCE hInstance)
 void NxIns_Shutdown(void)
 {
     if (g_ins.hInstallThread) {
-        WaitForSingleObject(g_ins.hInstallThread, 5000);
-        CloseHandle(g_ins.hInstallThread);
+        /* If the worker is still running after the wait, do NOT CloseHandle it:
+         * closing a handle to a live thread and then exiting is risky. On a
+         * forced exit we intentionally leak this one handle (the process is
+         * about to terminate anyway, which reclaims it). */
+        if (WaitForSingleObject(g_ins.hInstallThread, 5000) != WAIT_TIMEOUT) {
+            CloseHandle(g_ins.hInstallThread);
+        }
     }
 
     NxIns_DestroyGdi();
@@ -2890,9 +2998,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     /* ── Windows version gate ──
      * Nexia IDE requires Windows 7 SP1 or later (NT 6.1+).
-     * Block installation on XP (5.1), Vista (6.0), and older. */
+     * Block installation on XP (5.1), Vista (6.0), Win7 RTM (6.1 SP0),
+     * and anything older. */
     {
-        OSVERSIONINFOW osvi;
+        OSVERSIONINFOEXW osvi;
         ZeroMemory(&osvi, sizeof(osvi));
         osvi.dwOSVersionInfoSize = sizeof(osvi);
         #ifdef _MSC_VER
@@ -2903,7 +3012,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         #pragma GCC diagnostic push
         #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
         #endif
-        GetVersionExW(&osvi);
+        GetVersionExW((OSVERSIONINFOW *)&osvi);
         #ifdef _MSC_VER
         #pragma warning(pop)
         #endif
@@ -2911,15 +3020,35 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         #pragma GCC diagnostic pop
         #endif
 
-        if (osvi.dwMajorVersion < 6 ||
-            (osvi.dwMajorVersion == 6 && osvi.dwMinorVersion == 0)) {
-            /* XP = 5.1, Vista = 6.0 — both blocked */
-            MessageBoxW(NULL,
-                L"Nexia IDE requires Windows 7 or later.\n\n"
-                L"Your system is running an older version of Windows "
-                L"that is not supported.\n\n"
-                L"Please upgrade to Windows 7 SP1, 8.1, 10, or 11 to "
-                L"install Nexia IDE.",
+        BOOL blocked = FALSE;
+        const WCHAR *reason = NULL;
+
+        if (osvi.dwMajorVersion < 6) {
+            /* XP (5.1) or older */
+            blocked = TRUE;
+            reason = L"Nexia IDE requires Windows 7 SP1 or later.\n\n"
+                     L"Your system is running Windows XP or older, "
+                     L"which is not supported.\n\n"
+                     L"Please upgrade to Windows 7 SP1, 8.1, 10, or 11.";
+        } else if (osvi.dwMajorVersion == 6 && osvi.dwMinorVersion == 0) {
+            /* Vista (6.0) — blocked entirely */
+            blocked = TRUE;
+            reason = L"Nexia IDE requires Windows 7 SP1 or later.\n\n"
+                     L"Your system is running Windows Vista, "
+                     L"which is not supported.\n\n"
+                     L"Please upgrade to Windows 7 SP1, 8.1, 10, or 11.";
+        } else if (osvi.dwMajorVersion == 6 && osvi.dwMinorVersion == 1
+                   && osvi.wServicePackMajor < 1) {
+            /* Windows 7 RTM without SP1 */
+            blocked = TRUE;
+            reason = L"Nexia IDE requires Windows 7 Service Pack 1.\n\n"
+                     L"Your system is running Windows 7 without SP1. "
+                     L"Please install Service Pack 1 from Windows Update "
+                     L"before installing Nexia IDE.";
+        }
+
+        if (blocked) {
+            MessageBoxW(NULL, reason,
                 L"Nexia IDE - System Requirements",
                 MB_OK | MB_ICONERROR);
             return 1;

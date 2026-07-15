@@ -125,6 +125,9 @@ export const IPC = {
     PROJECT_GET_TEMPLATES: 'project:getTemplates',
     PROJECT_EXPORT: 'project:export',
     PROJECT_IMPORT: 'project:import',
+    VS_PICK: 'vs:pick',
+    VS_PREVIEW: 'vs:preview',
+    VS_IMPORT: 'vs:import',
 
     // Files
     FILE_READ: 'file:read',
@@ -140,6 +143,7 @@ export const IPC = {
     BUILD_RUN: 'build:run',
     BUILD_CLEAN: 'build:clean',
     BUILD_REBUILD: 'build:rebuild',
+    BUILD_CANCEL: 'build:cancel',
     BUILD_OUTPUT: 'build:output',
     BUILD_COMPLETE: 'build:complete',
 

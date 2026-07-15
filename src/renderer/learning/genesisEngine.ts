@@ -183,6 +183,14 @@ export class GenesisEngine {
     /** Timer handle for auto-evolution loop. */
     private autoTimeout: ReturnType<typeof setTimeout> | null = null;
 
+    /**
+     * Monotonically-increasing token identifying the current auto-evolve run.
+     * Each start/stop bumps it; an autoLoop chain captures the value at launch
+     * and bails the moment it no longer matches, so a stop→start cycle while an
+     * evolve() is in-flight can never leave two loops running concurrently.
+     */
+    private autoRunId: number = 0;
+
     /** The AI function to use for critique and evolution. Set via setAIFunction(). */
     private aiFunction: AIFunction | null = null;
 
@@ -307,6 +315,13 @@ export class GenesisEngine {
             return false;
         }
 
+        // Defensive: never dereference an out-of-range index. If a bad load left
+        // the timeline empty, re-seed Gen 0 before evolving.
+        if (this.generations.length === 0) {
+            this.generations = [{ html: INITIAL_GENOME, feedback: null }];
+            this.currentGen = 0;
+        }
+
         this.evolving = true;
         const currentGenome = this.generations[this.generations.length - 1].html;
         const genNumber = this.generations.length;
@@ -363,12 +378,17 @@ export class GenesisEngine {
     startAutoEvolve(): void {
         if (this.autoEvolving) return;
         this.autoEvolving = true;
-        this.autoLoop();
+        // Bump the run token and capture it for this loop chain. Any earlier
+        // in-flight loop now holds a stale token and will bail.
+        const myRun = ++this.autoRunId;
+        this.autoLoop(myRun);
     }
 
     /** Stop auto-evolution. */
     stopAutoEvolve(): void {
         this.autoEvolving = false;
+        // Invalidate any in-flight loop chain so it can't schedule another tick.
+        this.autoRunId++;
         if (this.autoTimeout) {
             clearTimeout(this.autoTimeout);
             this.autoTimeout = null;
@@ -384,12 +404,19 @@ export class GenesisEngine {
         }
     }
 
-    /** Internal auto-evolution loop. */
-    private async autoLoop(): Promise<void> {
-        if (!this.autoEvolving) return;
+    /**
+     * Internal auto-evolution loop.
+     * @param myRun - The run token captured when this loop chain started. If it
+     *   ever differs from this.autoRunId, a newer start/stop happened and this
+     *   (now stale) chain aborts so only one loop is ever active.
+     */
+    private async autoLoop(myRun: number): Promise<void> {
+        if (!this.autoEvolving || myRun !== this.autoRunId) return;
         await this.evolve();
-        if (!this.autoEvolving) return;
-        this.autoTimeout = setTimeout(() => this.autoLoop(), 3000);
+        // Re-check after the (>3s) AI call — a stop/restart may have happened
+        // while evolve() was in-flight.
+        if (!this.autoEvolving || myRun !== this.autoRunId) return;
+        this.autoTimeout = setTimeout(() => this.autoLoop(myRun), 3000);
     }
 
     // ── Persistence ──
@@ -441,7 +468,19 @@ export class GenesisEngine {
             if (data.version !== 1 || !Array.isArray(data.generations)) return false;
 
             this.generations = data.generations;
-            this.currentGen = Math.min(data.currentGen || 0, this.generations.length - 1);
+
+            // Guard against a saved file with an empty generations array: that would
+            // leave currentGen = -1 and make the next evolve() deref generations[-1].
+            // Re-seed Gen 0 exactly as the constructor does so the engine stays usable.
+            if (this.generations.length === 0) {
+                this.generations = [{ html: INITIAL_GENOME, feedback: null }];
+                this.currentGen = 0;
+            } else {
+                // Clamp the saved index into the valid [0, length-1] range.
+                this.currentGen = Math.min(
+                    Math.max(0, data.currentGen || 0),
+                    this.generations.length - 1);
+            }
             this.guidance = data.guidance || '';
 
             this.log(`[Genesis] Loaded ${this.generations.length} generations`);

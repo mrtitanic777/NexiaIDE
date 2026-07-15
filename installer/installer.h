@@ -233,9 +233,9 @@ typedef struct {
     /* Installation progress */
     BOOL            installing;
     BOOL            installSuccess;
-    BOOL            installCancelled;
-    int             filesExtracted;
-    int             filesToExtract;
+    volatile BOOL   installCancelled;   /* written by UI thread, read by worker in tight loops */
+    volatile int    filesExtracted;     /* written by worker, read by UI */
+    volatile int    filesToExtract;     /* written by worker, read by UI */
     WCHAR           statusText[512];
 
     /* Payload info (found at end of our own EXE) */
@@ -250,9 +250,9 @@ typedef struct {
     BOOL            sdkInstallerFound;
     WCHAR           sdkInstallerPath[NXI_MAX_PATH];
     BOOL            extractSdk;         /* user chose to extract SDK */
-    int             sdkExtractPhase;    /* 0=scanning, 1=extracting cabs, 2=decompressing */
-    int             sdkCabsTotal;
-    int             sdkCabsDone;
+    volatile int    sdkExtractPhase;    /* 0=scanning, 1=extracting cabs, 2=decompressing (worker writes, UI reads) */
+    volatile int    sdkCabsTotal;       /* written by worker, read by UI */
+    volatile int    sdkCabsDone;        /* written by worker, read by UI */
     int             sdkFilesExtracted;
 
     /* Pre-flight detection */

@@ -105,7 +105,7 @@ export function openProjectProperties() {
         return;
     }
 
-    const proj = currentProject;
+    const proj = _getCurrentProject();
     const props = proj.properties || {};
 
     // Set title
@@ -246,7 +246,7 @@ export function openProjectProperties() {
 export function applyProjectProperties() {
     if (!_getCurrentProject()) return;
 
-    const proj = currentProject;
+    const proj = _getCurrentProject();
     if (!proj.properties) proj.properties = {};
     const props = proj.properties;
 

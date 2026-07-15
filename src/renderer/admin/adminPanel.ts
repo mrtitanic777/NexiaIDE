@@ -79,7 +79,7 @@ interface BuilderState {
 
 let _builder: BuilderState | null = null;
 let _panel: HTMLElement | null = null;
-let _subTab: 'users' | 'builder' | 'cloud' = 'builder';
+let _subTab: 'users' | 'builder' | 'cloud' | 'releases' = 'builder';
 
 // ── Syntax Highlighting (simplified, matching cinematic engine) ──
 
@@ -129,7 +129,8 @@ export function render(container: HTMLElement) {
     tabBar.innerHTML = `
         <div class="admin-tab ${_subTab === 'builder' ? 'active' : ''}" data-tab="builder">Lesson Builder</div>
         <div class="admin-tab ${_subTab === 'users' ? 'active' : ''}" data-tab="users">Users</div>
-        <div class="admin-tab ${_subTab === 'cloud' ? 'active' : ''}" data-tab="cloud">Cloud Lessons</div>`;
+        <div class="admin-tab ${_subTab === 'cloud' ? 'active' : ''}" data-tab="cloud">Cloud Lessons</div>
+        <div class="admin-tab ${_subTab === 'releases' ? 'active' : ''}" data-tab="releases">Releases</div>`;
     tabBar.addEventListener('click', (e) => {
         const tab = (e.target as HTMLElement).dataset?.tab;
         if (tab) { _subTab = tab as any; render(container); }
@@ -143,6 +144,92 @@ export function render(container: HTMLElement) {
     if (_subTab === 'users') renderUsersTab(content);
     else if (_subTab === 'builder') renderBuilderTab(content);
     else if (_subTab === 'cloud') renderCloudTab(content);
+    else if (_subTab === 'releases') renderReleasesTab(content);
+}
+
+// ══════════════════════════════════════
+//  RELEASES TAB — publish an update to every client
+// ══════════════════════════════════════
+
+async function renderReleasesTab(container: HTMLElement) {
+    container.innerHTML = '<div style="padding:16px;color:var(--text-dim)">Loading current release…</div>';
+
+    const cur = await auth.getLatestRelease();
+    const live = cur.success ? cur.update : null;
+
+    container.innerHTML = '';
+    const header = document.createElement('div');
+    header.className = 'admin-section-header';
+    header.innerHTML = '<span>Software Releases</span>';
+    container.appendChild(header);
+
+    const status = document.createElement('div');
+    status.style.cssText = 'margin:0 16px 14px;padding:12px 14px;border-radius:var(--radius-md);border:1px solid var(--border);background:var(--bg-input)';
+    status.innerHTML = live
+        ? `<div style="font-size:12px;color:var(--text-dim);margin-bottom:4px">Currently published — every client on an older version is prompted to install this.</div>
+           <div style="font-size:14px;font-weight:600;color:var(--green)">v${escHtml(live.version)} — ${escHtml(live.title || '')}</div>
+           <div style="font-size:11px;color:var(--text-muted);margin-top:4px;font-family:monospace">${escHtml(live.downloadUrl || '')}</div>
+           <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${(live.notes || []).length} note(s) · ${live.size ? (live.size / 1048576).toFixed(1) + ' MB' : 'size unknown'}${live.mandatory ? ' · REQUIRED' : ''} · published by ${escHtml(live.publishedBy || '?')}</div>
+           <button class="admin-btn admin-btn-sm admin-btn-delete" id="rel-pull" style="margin-top:10px">Pull Release</button>`
+        : '<div style="font-size:12px;color:var(--text-dim)">No release is currently published. Clients are not being prompted.</div>';
+    container.appendChild(status);
+
+    const form = document.createElement('div');
+    form.style.cssText = 'padding:0 16px 20px;display:flex;flex-direction:column;gap:10px';
+    form.innerHTML = `
+        <div class="lb-section-title">PUBLISH A RELEASE</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div><label class="lb-field-label">Version</label><input class="lb-field-input" id="rel-version" placeholder="2.2.0" value="${escHtml(live?.version || '')}"></div>
+            <div><label class="lb-field-label">Download size (bytes)</label><input class="lb-field-input" id="rel-size" placeholder="157724618" value="${live?.size || ''}"></div>
+        </div>
+        <div><label class="lb-field-label">Headline</label><input class="lb-field-input" id="rel-title" placeholder="Design overhaul, cloud lessons & security updates" value="${escHtml(live?.title || '')}"></div>
+        <div><label class="lb-field-label">Download URL (https)</label><input class="lb-field-input" id="rel-url" spellcheck="false" placeholder="https://auth.logansreplicas.com/downloads/NexiaSetup-2.2.0.exe" value="${escHtml(live?.downloadUrl || '')}"></div>
+        <div><label class="lb-field-label">SHA-256 (optional but recommended — clients reject a mismatch)</label><input class="lb-field-input" id="rel-sha" spellcheck="false" placeholder="64-char hex digest" value="${escHtml(live?.sha256 || '')}"></div>
+        <div><label class="lb-field-label">What's new — one bullet per line</label>
+            <textarea class="lb-field-input lb-field-textarea" id="rel-notes" rows="7" spellcheck="false" placeholder="Three new IDE skins: Blade, Devkit, Phosphor&#10;Curriculum lesson viewer with progress tracking&#10;Cloud lesson downloads and update notifications&#10;Security: hardened login lockout">${escHtml((live?.notes || []).join('\n'))}</textarea></div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-dim)">
+            <input type="checkbox" id="rel-mandatory" ${live?.mandatory ? 'checked' : ''}> Required update (users can't dismiss it)
+        </label>
+        <div id="rel-msg" style="font-size:12px;display:none"></div>
+        <div><button class="admin-btn admin-btn-primary" id="rel-publish">☁ Publish &amp; Notify Users</button></div>`;
+    container.appendChild(form);
+
+    function msg(text: string, ok: boolean) {
+        const m = form.querySelector('#rel-msg') as HTMLElement;
+        m.style.display = 'block';
+        m.textContent = text;
+        m.style.color = ok ? 'var(--green)' : '#f44747';
+    }
+
+    status.querySelector('#rel-pull')?.addEventListener('click', async () => {
+        if (!confirm('Pull the published release? Clients will stop being prompted.')) return;
+        const r = await auth.clearRelease();
+        if (r.success) renderReleasesTab(container);
+        else alert('Failed: ' + (r.error || 'unknown'));
+    });
+
+    form.querySelector('#rel-publish')!.addEventListener('click', async () => {
+        const btn = form.querySelector('#rel-publish') as HTMLButtonElement;
+        const manifest = {
+            version: (form.querySelector('#rel-version') as HTMLInputElement).value.trim(),
+            title: (form.querySelector('#rel-title') as HTMLInputElement).value.trim(),
+            downloadUrl: (form.querySelector('#rel-url') as HTMLInputElement).value.trim(),
+            sha256: (form.querySelector('#rel-sha') as HTMLInputElement).value.trim() || null,
+            size: parseInt((form.querySelector('#rel-size') as HTMLInputElement).value, 10) || 0,
+            mandatory: (form.querySelector('#rel-mandatory') as HTMLInputElement).checked,
+            notes: (form.querySelector('#rel-notes') as HTMLTextAreaElement).value
+                .split('\n').map(l => l.trim()).filter(Boolean),
+        };
+        btn.disabled = true; btn.textContent = 'Publishing…';
+        const r = await auth.publishRelease(manifest);
+        btn.disabled = false; btn.textContent = '☁ Publish & Notify Users';
+        if (r.success) {
+            msg(`Published v${manifest.version}. Every client older than this will be prompted on next launch.`, true);
+            renderReleasesTab(container);
+        } else {
+            msg('Publish failed: ' + (r.error || 'unknown error'), false);
+        }
+    });
 }
 
 // ══════════════════════════════════════

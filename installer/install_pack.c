@@ -67,13 +67,31 @@ static void sCollectFiles(FileCollector *fc, const WCHAR *dir)
             sCollectFiles(fc, fullPath);
         } else {
             if (fc->count >= fc->capacity) {
-                fc->capacity = fc->capacity ? fc->capacity * 2 : 256;
-                fc->entries = (NxInsFileEntry *)realloc(fc->entries,
-                    fc->capacity * sizeof(NxInsFileEntry));
-                fc->fileSizes = (DWORD *)realloc(fc->fileSizes,
-                    fc->capacity * sizeof(DWORD));
-                fc->fileTimes = (FILETIME *)realloc(fc->fileTimes,
-                    fc->capacity * sizeof(FILETIME));
+                int newCapacity = fc->capacity ? fc->capacity * 2 : 256;
+                /* realloc into temp pointers so the originals are not lost on
+                 * failure (assigning NULL back would leak and then crash). */
+                NxInsFileEntry *newEntries = (NxInsFileEntry *)realloc(fc->entries,
+                    newCapacity * sizeof(NxInsFileEntry));
+                DWORD *newSizes = (DWORD *)realloc(fc->fileSizes,
+                    newCapacity * sizeof(DWORD));
+                FILETIME *newTimes = (FILETIME *)realloc(fc->fileTimes,
+                    newCapacity * sizeof(FILETIME));
+
+                if (!newEntries || !newSizes || !newTimes) {
+                    wprintf(L"  ERROR: Out of memory growing file table\n");
+                    /* Free whatever did succeed (and the originals on the
+                     * pointers that failed) before aborting. */
+                    free(newEntries ? newEntries : fc->entries);
+                    free(newSizes ? newSizes : fc->fileSizes);
+                    free(newTimes ? newTimes : fc->fileTimes);
+                    FindClose(hFind);
+                    exit(1);
+                }
+
+                fc->entries = newEntries;
+                fc->fileSizes = newSizes;
+                fc->fileTimes = newTimes;
+                fc->capacity = newCapacity;
             }
 
             NxInsFileEntry *fe = &fc->entries[fc->count];

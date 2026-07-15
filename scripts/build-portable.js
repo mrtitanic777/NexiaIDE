@@ -169,7 +169,11 @@ function run() {
     const cwd = path.join(__dirname, '..');
     const builderCmd = path.join(cwd, 'node_modules', '.bin', 'electron-builder');
 
-    const builder = spawn(builderCmd, ['--win'], {
+    // Quote the command path: with shell:true the command string is parsed by
+    // cmd.exe, so an unquoted path containing spaces (e.g. "My Projects") splits
+    // and fails with "'...\My' is not recognized". PATHEXT still resolves the
+    // extensionless bin to electron-builder.cmd.
+    const builder = spawn('"' + builderCmd + '"', ['--win'], {
             cwd: cwd,
             stdio: ['ignore', 'pipe', 'pipe'],
             shell: true,

@@ -46,7 +46,9 @@ export interface Tip {
 const LEVEL_ORDER: Record<SkillLevel, number> = { beginner: 0, intermediate: 1, expert: 2 };
 
 export function shouldShowTip(tip: Tip, userLevel: SkillLevel): boolean {
-    return LEVEL_ORDER[userLevel] <= LEVEL_ORDER[tip.minLevel];
+    // minLevel is a MINIMUM: show the tip when the user's level is at or above it.
+    // beginner (0) tips show to everyone; expert (2) tips only to experts.
+    return LEVEL_ORDER[userLevel] >= LEVEL_ORDER[tip.minLevel];
 }
 
 export const TIPS_DATABASE: Tip[] = [

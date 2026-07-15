@@ -331,6 +331,16 @@ export class DevkitManager {
             const socket = new net.Socket();
             let responseData = '';
             let sentCommand = false;
+            // The 2s timer, 'timeout', and 'error' handlers all race to settle
+            // this promise. Guard so only the first wins — otherwise the success
+            // emit can fire alongside a late error and the outcome is unreliable.
+            let settled = false;
+            const done = (fn: () => void) => {
+                if (settled) return;
+                settled = true;
+                try { socket.destroy(); } catch {}
+                fn();
+            };
 
             socket.setTimeout(XBDM_TIMEOUT);
 
@@ -343,35 +353,29 @@ export class DevkitManager {
                     socket.write(`magicboot title="${cleanPath}" directory="${cleanPath.substring(0, cleanPath.lastIndexOf('\\'))}\\"\r\n`);
 
                     setTimeout(() => {
-                        socket.destroy();
                         if (responseData.includes('200') || responseData.includes('OK')) {
-                            this.emit(`✓ Title launched: ${cleanPath}\n`);
-                            resolve();
+                            done(() => { this.emit(`✓ Title launched: ${cleanPath}\n`); resolve(); });
                         } else if (responseData.includes('402') || responseData.includes('not found')) {
-                            reject(new Error(`File not found: ${cleanPath}`));
+                            done(() => reject(new Error(`File not found: ${cleanPath}`)));
                         } else {
                             // magicboot usually causes a disconnect as the console reboots into the title
-                            this.emit(`✓ Launch command sent: ${cleanPath}\n`);
-                            resolve();
+                            done(() => { this.emit(`✓ Launch command sent: ${cleanPath}\n`); resolve(); });
                         }
                     }, 2000);
                 }
             });
 
             socket.on('timeout', () => {
-                socket.destroy();
                 // Timeout is expected — console reboots into the title
-                this.emit(`✓ Launch command sent (console rebooting into title)\n`);
-                resolve();
+                done(() => { this.emit(`✓ Launch command sent (console rebooting into title)\n`); resolve(); });
             });
 
             socket.on('error', (err: any) => {
                 // Connection reset is expected when magicboot triggers a reboot
                 if (err.code === 'ECONNRESET' || err.code === 'EPIPE') {
-                    this.emit(`✓ Title launching (console rebooting)\n`);
-                    resolve();
+                    done(() => { this.emit(`✓ Title launching (console rebooting)\n`); resolve(); });
                 } else {
-                    reject(err);
+                    done(() => reject(err));
                 }
             });
 

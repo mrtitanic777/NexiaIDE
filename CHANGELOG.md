@@ -1,52 +1,112 @@
 # Changelog
 
+## v2.2.0
+
+### Interoperability
+- **Visual Studio import** — `File → Import from Visual Studio (.sln)`. Reads `.sln` solutions and both project formats the Xbox 360 XDK shipped against (`.vcxproj` MSBuild and legacy `.vcproj`), and maps them onto a Nexia project: sources, headers, include directories, library directories, libraries, preprocessor defines, precompiled header, RTTI, exception handling, warning level, optimization and configuration type. Multi-project solutions let you choose which project to bring over. Source files are **copied, never moved**, so the original VS project keeps building. A preview shows exactly what will be imported — including anything deliberately skipped — before a single file is written.
+
+### Appearance
+- **Structural skins** — three selectable skins that restyle the interface itself rather than recolouring it (`Settings → Appearance`):
+  - **Blade** — the 2005 Xbox 360 dashboard: curved sliding blades, ring-of-light glow, deep green field.
+  - **Devkit** — the IDE as hardware: brushed chassis, machined bezel, keycap rail, status LEDs, recessed screen.
+  - **Phosphor** — CRT terminal brutalism: monospace throughout, hard 1px rules, scanlines and phosphor bloom.
+- Colour presets still apply on top of any skin.
+
+### Learning
+- **Curriculum lesson viewer** — the built-in 8-module / 17-lesson curriculum is now playable. Steps through text, code, exercises (with hints and solutions), quizzes and visualizations, and records real progress against the adaptive learning profile.
+- **Progress now actually tracks** — quizzes and lesson completion feed the mastery model (previously `recordInteraction`/`recordLessonProgress` were never called by anything).
+- **Cloud lessons** — browse, download and update published lessons from the Learn panel, with version-aware update badges and a startup notice.
+- **Progress sync** — the learning profile syncs to your Nexia account and merges across devices (monotonic field-wise merge, so two machines can't clobber each other).
+
+### Software updates
+- **Built-in updater** — the IDE checks a release manifest on the Nexia server and shows a release popup with the version, headline and changelog. Downloads report live progress and are **SHA-256 verified before anything is executed** — a mismatch is rejected.
+- **Admin → Releases** — publish or pull a release from inside the IDE.
+
+### Fixes
+- **You stay signed in.** Sessions expired after 2 hours (`TOKEN_EXPIRY: '2h'`), and on expiry the client deleted its token file — losing your identity as well as your session. Tokens now last 30 days and the last account is remembered separately (username/email only, no secrets).
+- **Welcome-back prompt** — signed-out users get a "sign in as *you* / different account / continue without an account" choice with the trade-offs spelled out. Signed-in users are only ever interrupted by a release popup.
+- **Discord membership** — the IDE claimed you hadn't joined the Nexia server when you had. The check read the *user's* OAuth guild list (which silently fails without the `guilds` scope or with an expired token) and treated "couldn't check" as "not a member". Membership is now confirmed via the bot, and an undetermined result never nags.
+- **Server Settings** was unreachable from the account menu.
+- **Build from a path containing spaces** — `build-portable.js` invoked `electron-builder` unquoted, breaking any project path with a space in it.
+
+### Security
+- Update downloads are SHA-256 verified against the signed manifest before execution.
+- Non-HTTPS download URLs are refused.
+- Hardened login lockout (per-email serialization) and transactional registration.
+
+## v2.1.0
+
+### Compatibility
+- **Windows 7/8/8.1 support** — pinned to Electron 22 (Chromium 108, Node.js 16), the last version with Windows 7 support. All IDE features work identically across Windows 7 through Windows 11.
+
+### Installer
+- **Native Win32 installer** — custom dark-themed wizard UI with welcome screen, license agreement, directory picker, component selection, animated progress bar, Start Menu and Desktop shortcuts, file associations, and Add/Remove Programs registration.
+- **Self-extracting payload** — the installer packs the entire Electron app as a binary payload appended to the EXE. No NSIS, no WiX, no external frameworks.
+- **`build-installer.bat`** — one-click script that compiles TypeScript, runs electron-builder, compiles the native installer with MinGW, and packs everything into `NexiaSetup.exe`.
+
+## v2.0.0
+
+### Architecture
+- **TypeScript rewrite** — entire codebase ported from C/Win32 to TypeScript/Electron (18,000+ lines across 21 source files).
+- **Modular decomposition** — `app.ts` decomposed into focused modules: `aiService.ts` (1,600 lines), `xexInspector.ts`, `searchPanel.ts`, connected via `appContext.ts` shared state bridge.
+- **Monaco editor** — replaced custom text editor with Monaco (VS Code's editor core) with Xbox 360 C++ syntax highlighting and IntelliSense.
+
+### AI Tutor Intelligence
+- **Adaptive system prompt** — AI receives structured tutor context with categorized mastery levels, current lesson position, recent activity history, and time-since-last-session awareness.
+- **Proactive tutoring** — AI automatically congratulates lesson completions, explains quiz failures, welcomes learners back after breaks, and helps diagnose build errors.
+- **AI-triggered visualizations** — AI responses containing `[VIZ:...]` tags automatically render diagrams in the Visualizer panel.
+- **Multi-provider support** — Anthropic, OpenAI, Ollama, and custom endpoint support with SSE streaming.
+
+### Learning System
+- **8-module curriculum** — expanded from 4 modules / 6 lessons to 8 modules / 17 lessons / 55+ content items covering: Getting Started, Control Flow, Functions, Pointers & Memory, Data & I/O, Arrays & Collections, Classes & OOP, Xbox 360 Specifics (Xenon architecture, D3D9, XInput).
+- **Adaptive learning profile** — tracks mastery across 30 concepts (including 5 new Xbox 360 concepts) with spaced repetition, pattern analysis, and per-concept history.
+- **Genesis Lab** — self-evolving AI lesson engine that generates lessons, critiques them, and refines through iterative evolution. Persistent across sessions with auto-save to `~/.nexia-ide-genesis.json` and HTML export.
+
+### Code Visualizer
+- **Ported from Direct2D to Canvas 2D** — cross-platform rendering with the same visual quality.
+- **Flow chart renderer** — auto-layout with diamonds for decisions, pills for start/end, rectangles for processes, edge labels for branches.
+- **Class diagram renderer** — UML-style boxes with name header, members section, methods section, and inheritance arrows.
+- **New commands** — `FLOW:`, `IF:`, `LOOP:`, `CLASS:`, `INHERIT:` added to the visualization command parser.
+- **Convenience methods** — `visualizeIfElse()`, `visualizeLoop()` for quick diagram generation.
+
+### IDE
+- **XEX Inspector** — parse and display Xbox 360 executable headers, base address, entry point, imports, and exports.
+- **Find in Files** — project-wide search with regex support, extracted as standalone module.
+- **AI settings dialog** — multi-provider configuration with API key management.
+- **AI hint bar** — context menu actions for explain, fix, refactor, optimize, and generate on selected code.
+
 ## v1.1.0
 
 ### Build System
-- **Incremental compilation** — only recompiles source files that changed since the last build. Object file timestamps are compared against source (and PCH) timestamps; unchanged files are skipped. Build output shows "N files up-to-date, skipped."
-- **Parallel compilation** — up to 4 source files compile concurrently, roughly halving full rebuild times on multi-core machines. PCH still compiles first sequentially since all files depend on it.
-- **Response file for linker** — linker arguments are written to `link.rsp` instead of being passed on the command line, fixing "The command line is too long" errors on large projects (120+ source files).
-- **Case-insensitive source dedup** — source file discovery now uses case-insensitive path comparison, preventing duplicate object file warnings when `sourceFiles` in nexia.json has different casing than files on disk.
-- **Object name collision detection** — warns at build time if two source files in different directories would produce the same `.obj` name.
-- **Stale source file cleanup** — on project open, `sourceFiles` entries that no longer exist on disk are automatically pruned from nexia.json.
+- Incremental compilation — only recompiles changed source files.
+- Parallel compilation — up to 4 files concurrently.
+- Response file for linker — fixes command line length errors on large projects.
+- Case-insensitive source dedup and object name collision detection.
+- Stale source file cleanup on project open.
 
 ### Project Properties
-- **New Project Properties dialog** (Build → Project Properties...) with persistent per-project compiler and linker settings:
-  - **Enable RTTI** (`/GR` vs `/GR-`) — fixes C4541 warnings when using `dynamic_cast` on polymorphic types
-  - **Exception Handling** — `/EHsc`, `/EHs`, `/EHa`, or disabled
-  - **Warning Level** — `/W0` through `/W4`
-  - **Additional Compiler Flags** — free-form text for extra cl.exe flags
-  - **Additional Linker Flags** — free-form text for extra link.exe flags
-- All settings saved to nexia.json and applied automatically on build.
+- New Project Properties dialog with persistent per-project compiler and linker settings (RTTI, exception handling, warning level, additional flags).
 
 ### Editor
-- **Find & Replace in Files** — the Search panel now supports replace. Toggle the ↔ option to reveal the replace input and "Replace All" button. Confirms before replacing, updates open editor tabs, and refreshes search results.
+- Find & Replace in Files with confirmation and live tab updates.
 
 ### Workspace
-- **Workspace state persistence** — open tabs, expanded folders, sidebar/panel visibility, and active tab are saved on close and restored on reopen.
-- **File type filtering on import** — "Add Existing File" filters by context (headers vs sources) and copies to the appropriate directory.
-- **Multi-file selection** — import multiple files at once.
-- **Hide project config files** — nexia.json and nexia-workspace.json hidden from the file explorer by default.
+- Workspace state persistence (open tabs, expanded folders, sidebar/panel visibility).
+- File type filtering and multi-file selection on import.
+- Hidden project config files in explorer.
 
 ### Bug Fixes
-- Fixed UTF-8 encoding corruption across all source files (3,700+ mojibake sequences from cp1252 double-encoding).
-- Fixed build output double-spacing caused by trailing newline handling in `appendOutput()`.
-- Fixed copyright symbol mojibake in package.json.
-- Removed auto-generated assets folder from new projects.
-- Fixed `getSystemInfo` sending the XBDM command repeatedly due to missing `sentCommand` guard, causing duplicate commands and wasted bandwidth.
-- Fixed `listVolumes` using a blind `setTimeout` instead of detecting the XBDM end-of-response marker (`\r\n.\r\n`), improving reliability on slow connections and removing unnecessary delay on fast ones.
-- Fixed hardcoded `project:export` and `project:import` IPC strings — added `PROJECT_EXPORT` and `PROJECT_IMPORT` to the `IPC` constants object and updated all references.
-- Fixed `elapsed()` centisecond calculation displaying incorrect values (e.g. 5ms showing as 50cs).
-- Moved `guildId` declaration to the top of the Discord class with other private fields for clarity.
+- Fixed UTF-8 encoding corruption across all source files.
+- Fixed build output double-spacing.
+- Fixed `getSystemInfo` sending XBDM commands repeatedly.
+- Fixed `listVolumes` using blind setTimeout instead of response marker detection.
+- Fixed hardcoded IPC strings for project export/import.
+- Fixed `elapsed()` centisecond calculation.
 
 ### Security Fixes
-- Fixed command injection vulnerability in project export/import — replaced `execSync` with `execFile` + argument arrays and added path escaping.
-- Fixed command injection vulnerability in extension zip extraction — added single-quote escaping for PowerShell paths.
-- Added URL validation for Discord download handler, restricting downloads to `cdn.discordapp.com` and `media.discordapp.net`.
-- Replaced `mainWindow!` non-null assertions with proper null checks to prevent crashes during shutdown or before window creation.
-
-### Reliability Fixes
-- Added `console.error()` logging to previously silent `catch {}` blocks in settings loading, recent projects, extension state, and installed extensions.
+- Fixed command injection in project export/import and extension extraction.
+- Added URL validation for Discord download handler.
+- Replaced non-null assertions with proper null checks.
 
 ## v1.0.0
 

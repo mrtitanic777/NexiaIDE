@@ -39,7 +39,7 @@ function escHtml(s: string): string {
 
 // ── Modal ──
 
-function showModal(mode: 'login' | 'register') {
+function showModal(mode: 'login' | 'register', prefillEmail?: string) {
     if (_modalOverlay) _modalOverlay.remove();
 
     _modalOverlay = document.createElement('div');
@@ -56,7 +56,14 @@ function showModal(mode: 'login' | 'register') {
     document.body.appendChild(_modalOverlay);
     requestAnimationFrame(() => _modalOverlay!.classList.add('visible'));
 
-    wireAuthForm(modal, mode);
+    // Prefill the email when we already know who was last signed in, so
+    // "Sign in as <you>" only asks for the password.
+    if (prefillEmail) {
+        const emailInput = modal.querySelector('#auth-email') as HTMLInputElement;
+        if (emailInput) emailInput.value = prefillEmail;
+    }
+
+    wireAuthForm(modal, mode, !!prefillEmail);
 }
 
 function closeModal() {
@@ -64,6 +71,82 @@ function closeModal() {
         _modalOverlay.classList.remove('visible');
         setTimeout(() => { _modalOverlay?.remove(); _modalOverlay = null; }, 200);
     }
+}
+
+// ── Server Settings Modal ──
+
+function showServerModal() {
+    if (_modalOverlay) _modalOverlay.remove();
+
+    _modalOverlay = document.createElement('div');
+    _modalOverlay.className = 'auth-modal-overlay';
+    _modalOverlay.addEventListener('click', (e) => {
+        if (e.target === _modalOverlay) closeModal();
+    });
+
+    const modal = document.createElement('div');
+    modal.className = 'auth-modal';
+    const current = auth.getServerUrl();
+    const isDefault = current === auth.getDefaultServerUrl();
+    modal.innerHTML = `
+        <div class="auth-modal-header">
+            <div class="auth-modal-title">Server Settings</div>
+            <button class="auth-modal-close" id="srv-close">✕</button>
+        </div>
+        <div class="auth-modal-body">
+            <div class="auth-error" id="srv-msg" style="display:none"></div>
+            <label class="auth-label">Auth Server URL</label>
+            <input type="text" class="auth-input" id="srv-url" spellcheck="false"
+                   placeholder="https://auth.logansreplicas.com" value="${escHtml(current)}">
+            <div class="auth-switch" style="margin-top:6px">
+                ${isDefault ? 'Using the built-in default.' : 'Custom server (overrides the built-in default).'}
+                <a href="#" id="srv-reset">Reset to default</a>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:14px">
+                <button class="auth-submit" id="srv-test" style="flex:1;background:transparent;border:1px solid var(--border,#3a3a3a)">Test Connection</button>
+                <button class="auth-submit" id="srv-save" style="flex:1">Save</button>
+            </div>
+        </div>`;
+
+    _modalOverlay.appendChild(modal);
+    document.body.appendChild(_modalOverlay);
+    requestAnimationFrame(() => _modalOverlay!.classList.add('visible'));
+
+    const urlInput = modal.querySelector('#srv-url') as HTMLInputElement;
+    const msg = modal.querySelector('#srv-msg') as HTMLElement;
+
+    function setMsg(text: string, ok: boolean) {
+        msg.style.display = 'block';
+        msg.textContent = text;
+        msg.style.color = ok ? '#4ec9b0' : '#c04040';
+    }
+
+    modal.querySelector('#srv-close')!.addEventListener('click', closeModal);
+
+    modal.querySelector('#srv-reset')!.addEventListener('click', (e) => {
+        e.preventDefault();
+        urlInput.value = auth.getDefaultServerUrl();
+        setMsg('Reset to default — click Save to apply.', true);
+    });
+
+    modal.querySelector('#srv-test')!.addEventListener('click', async () => {
+        const url = urlInput.value.trim();
+        if (!url) { setMsg('Enter a server URL first.', false); return; }
+        const testBtn = modal.querySelector('#srv-test') as HTMLButtonElement;
+        testBtn.disabled = true; testBtn.textContent = 'Testing…';
+        const health = await auth.checkServerHealth(url);
+        testBtn.disabled = false; testBtn.textContent = 'Test Connection';
+        if (health.online) setMsg(`Online${health.version ? ' — v' + health.version : ''}.`, true);
+        else setMsg('No response. Check the URL and that the server is running.', false);
+    });
+
+    modal.querySelector('#srv-save')!.addEventListener('click', () => {
+        const applied = auth.setServerUrl(urlInput.value.trim() || null);
+        setMsg(`Saved. Now using ${applied}`, true);
+        setTimeout(closeModal, 900);
+    });
+
+    setTimeout(() => urlInput.focus(), 300);
 }
 
 function renderAuthForm(mode: 'login' | 'register'): string {
@@ -96,7 +179,7 @@ function renderAuthForm(mode: 'login' | 'register'): string {
         </div>`;
 }
 
-function wireAuthForm(modal: HTMLElement, mode: 'login' | 'register') {
+function wireAuthForm(modal: HTMLElement, mode: 'login' | 'register', focusPassword = false) {
     modal.querySelector('#auth-close')!.addEventListener('click', closeModal);
 
     modal.querySelector('#auth-switch-link')!.addEventListener('click', (e) => {
@@ -157,10 +240,10 @@ function wireAuthForm(modal: HTMLElement, mode: 'login' | 'register') {
         });
     });
 
-    // Focus first input
+    // Focus the first thing the user still has to fill in
     setTimeout(() => {
-        const first = modal.querySelector(mode === 'register' ? '#auth-username' : '#auth-email') as HTMLInputElement;
-        first?.focus();
+        const sel = focusPassword ? '#auth-password' : (mode === 'register' ? '#auth-username' : '#auth-email');
+        (modal.querySelector(sel) as HTMLInputElement)?.focus();
     }, 300);
 }
 
@@ -216,21 +299,30 @@ function toggleDropdown() {
                 </div>
             </div>
             <div class="auth-dropdown-sep"></div>
+            <div class="auth-dropdown-item" id="auth-dd-server">⚙ Server Settings</div>
             <div class="auth-dropdown-item auth-dropdown-danger" id="auth-dd-logout">↪ Sign Out</div>`;
 
+        _authDropdown.querySelector('#auth-dd-server')!.addEventListener('click', () => {
+            closeDropdown(); showServerModal();
+        });
         _authDropdown.querySelector('#auth-dd-logout')!.addEventListener('click', () => {
             closeDropdown(); auth.logout();
         });
     } else {
         _authDropdown.innerHTML = `
             <div class="auth-dropdown-item" id="auth-dd-login">↪ Sign In</div>
-            <div class="auth-dropdown-item" id="auth-dd-register">✦ Create Account</div>`;
+            <div class="auth-dropdown-item" id="auth-dd-register">✦ Create Account</div>
+            <div class="auth-dropdown-sep"></div>
+            <div class="auth-dropdown-item" id="auth-dd-server">⚙ Server Settings</div>`;
 
         _authDropdown.querySelector('#auth-dd-login')!.addEventListener('click', () => {
             closeDropdown(); showModal('login');
         });
         _authDropdown.querySelector('#auth-dd-register')!.addEventListener('click', () => {
             closeDropdown(); showModal('register');
+        });
+        _authDropdown.querySelector('#auth-dd-server')!.addEventListener('click', () => {
+            closeDropdown(); showServerModal();
         });
     }
 
@@ -308,8 +400,11 @@ export async function init(
     return user;
 }
 
-/** Show the login modal programmatically. */
-export function showLogin() { showModal('login'); }
+/** Show the server-settings modal programmatically (auth server URL + test/save). */
+export function showServerSettings() { showServerModal(); }
+
+/** Show the login modal programmatically. Pass an email to prefill it. */
+export function showLogin(prefillEmail?: string) { showModal('login', prefillEmail); }
 
 /** Show the register modal programmatically. */
 export function showRegister() { showModal('register'); }

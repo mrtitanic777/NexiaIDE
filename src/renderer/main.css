@@ -3483,3 +3483,258 @@ body:not(.fancy) .toggle-slider, body:not(.fancy) .toggle-slider::before {
 .compact-mode .menu-label { padding: 2px 8px; font-size: 11px; }
 .compact-mode .toolbar-btn { padding: 2px 8px; font-size: 11px; }
 .compact-mode .editor-tab { padding: 2px 10px; font-size: 11px; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   STRUCTURAL SKINS
+   Scoped to [data-skin]. The default skin is unaffected by everything
+   below. Each skin restyles structure, not just color — the palette
+   comes from the SKINS presets in app.ts.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ─────────────────────────────────────────────
+   BLADE — the 2005 Xbox 360 dashboard
+   ───────────────────────────────────────────── */
+[data-skin="blade"] #main {
+    background:
+        radial-gradient(120% 90% at 8% 50%, rgba(124,194,66,0.16), transparent 62%),
+        radial-gradient(100% 80% at 50% -10%, #123a2a 0%, transparent 60%),
+        var(--bg-dark);
+}
+[data-skin="blade"] #titlebar,
+[data-skin="blade"] #menubar {
+    background: linear-gradient(180deg, rgba(255,255,255,0.05), transparent), #07170f;
+    border-bottom: 1px solid rgba(159,232,112,0.14);
+}
+/* Icon rail becomes the back edge of a blade stack */
+[data-skin="blade"] #sidebar-tabs {
+    background: linear-gradient(100deg, #1d5c3a, #0c2f1e);
+    border-right: none;
+    box-shadow: 6px 0 26px rgba(0,0,0,0.55), inset -1px 0 0 rgba(255,255,255,0.10);
+    padding-top: 8px;
+}
+[data-skin="blade"] #sidebar-tabs > * {
+    border-radius: 0 14px 14px 0 !important;
+    margin: 2px 6px 2px 0;
+}
+/* The sidebar itself is the open blade — curved outer edge, glossy sheen */
+[data-skin="blade"] #sidebar {
+    background:
+        linear-gradient(180deg, rgba(255,255,255,0.07), transparent 40%),
+        linear-gradient(100deg, #1c6b45, #0b2f1f 72%);
+    border-right: none;
+    border-radius: 0 40px 40px 0;
+    box-shadow: 12px 0 46px rgba(0,0,0,0.6), inset 1px 0 0 rgba(255,255,255,0.16);
+    overflow: hidden;
+}
+[data-skin="blade"] .panel-header,
+[data-skin="blade"] .learn-section-title {
+    background: transparent;
+    color: #9fe870 !important;
+    font-size: 10.5px;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    font-weight: 500;
+    border-bottom: none;
+}
+[data-skin="blade"] .panel-body { background: transparent; }
+[data-skin="blade"] .learn-section,
+[data-skin="blade"] .lesson-card,
+[data-skin="blade"] .ach-item {
+    background: rgba(255,255,255,0.045);
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 10px;
+}
+[data-skin="blade"] .welcome-btn,
+[data-skin="blade"] .learn-action-btn {
+    border-radius: 22px;
+    background: linear-gradient(180deg, rgba(255,255,255,0.12), rgba(255,255,255,0.02));
+    border: 1px solid rgba(255,255,255,0.18);
+    color: #eaf7e3;
+}
+[data-skin="blade"] .welcome-btn:hover,
+[data-skin="blade"] .learn-action-btn:hover {
+    background: linear-gradient(180deg, rgba(159,232,112,0.30), rgba(159,232,112,0.08));
+    border-color: rgba(159,232,112,0.55);
+}
+[data-skin="blade"] .learn-action-primary {
+    background: linear-gradient(180deg, #9fe870, #5aa338);
+    color: #06120d; font-weight: 600; border: none;
+    box-shadow: 0 6px 20px rgba(124,194,66,0.32);
+}
+/* Ring-of-light treatment on the welcome mark */
+[data-skin="blade"] #welcome-logo {
+    filter: drop-shadow(0 0 18px rgba(159,232,112,0.55));
+}
+[data-skin="blade"] #welcome-content h1 { font-weight: 300; letter-spacing: -0.02em; }
+[data-skin="blade"] #statusbar {
+    background: linear-gradient(180deg, #0e3521, #07170f);
+    border-top: 1px solid rgba(159,232,112,0.18);
+}
+
+/* ─────────────────────────────────────────────
+   DEVKIT — the IDE as physical hardware
+   ───────────────────────────────────────────── */
+[data-skin="devkit"] #titlebar,
+[data-skin="devkit"] #menubar {
+    background:
+        repeating-linear-gradient(96deg, rgba(255,255,255,0.022) 0 2px, transparent 2px 5px),
+        linear-gradient(180deg, #3a3e44, #24272b);
+    border-bottom: 1px solid #14161a;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.16);
+}
+[data-skin="devkit"] #titlebar-text {
+    letter-spacing: 0.28em; text-transform: uppercase; font-weight: 700;
+    font-size: 11px; color: #c3c8cf;
+}
+/* Icon rail becomes a row of keycaps */
+[data-skin="devkit"] #sidebar-tabs {
+    background: linear-gradient(180deg, #34383e, #1f2226);
+    border-right: 1px solid #131518;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.12);
+    padding: 8px 0; gap: 7px;
+}
+[data-skin="devkit"] #sidebar-tabs > * {
+    border-radius: 5px !important;
+    margin: 0 5px;
+    background: linear-gradient(180deg, #43484f, #2c3036);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.22), 0 2px 0 #16181b, 0 3px 6px rgba(0,0,0,0.5);
+    border: 1px solid #1b1e22;
+}
+[data-skin="devkit"] #sidebar-tabs > *.active,
+[data-skin="devkit"] #sidebar-tabs > *:hover {
+    background: linear-gradient(180deg, #7ee69b, #43b365) !important;
+    color: #0e1a12 !important;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.5), 0 0 16px rgba(94,224,127,0.4), 0 2px 0 #16181b;
+}
+/* Sidebar = brushed chassis panel */
+[data-skin="devkit"] #sidebar {
+    background:
+        repeating-linear-gradient(96deg, rgba(255,255,255,0.018) 0 2px, transparent 2px 5px),
+        linear-gradient(180deg, #2f3338, #1e2125);
+    border-right: 1px solid #131518;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.10);
+}
+[data-skin="devkit"] .panel-header,
+[data-skin="devkit"] .learn-section-title {
+    font-family: var(--mono);
+    font-size: 9px; letter-spacing: 0.28em; text-transform: uppercase;
+    color: #8b919a !important;
+    background: linear-gradient(180deg, #2a2e33, #212429);
+    border-bottom: 1px solid #14161a;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+}
+/* Editor + main area = recessed, bezelled screen */
+[data-skin="devkit"] #editor-area,
+[data-skin="devkit"] #welcome-screen {
+    background: linear-gradient(180deg, #0a0c0d, #070809);
+    box-shadow: inset 0 3px 16px rgba(0,0,0,0.9), inset 0 0 0 1px rgba(255,255,255,0.05);
+}
+[data-skin="devkit"] .learn-section,
+[data-skin="devkit"] .lesson-card,
+[data-skin="devkit"] .ach-item {
+    background: linear-gradient(180deg, #2b2f34, #212429);
+    border: 1px solid #14161a;
+    border-radius: 4px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.10);
+}
+[data-skin="devkit"] .welcome-btn,
+[data-skin="devkit"] .learn-action-btn {
+    border-radius: 5px;
+    background: linear-gradient(180deg, #43484f, #2c3036);
+    border: 1px solid #1b1e22;
+    color: #cdd3da;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.22), 0 2px 0 #16181b;
+    text-transform: uppercase; letter-spacing: 0.1em; font-size: 11px; font-weight: 600;
+}
+[data-skin="devkit"] .welcome-btn:active,
+[data-skin="devkit"] .learn-action-btn:active {
+    transform: translateY(2px);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.2);
+}
+[data-skin="devkit"] .learn-action-primary {
+    background: linear-gradient(180deg, #7ee69b, #43b365);
+    color: #0e1a12; border: 1px solid #2c7a48;
+}
+[data-skin="devkit"] #statusbar {
+    background: linear-gradient(180deg, #34383e, #1f2226);
+    border-top: 1px solid #131518;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.12);
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em;
+}
+
+/* ─────────────────────────────────────────────
+   PHOSPHOR — CRT terminal brutalism
+   ───────────────────────────────────────────── */
+[data-skin="phosphor"] {
+    --radius-xs: 0; --radius-sm: 0; --radius-md: 0; --radius-lg: 0; --radius-xl: 0;
+}
+[data-skin="phosphor"] #main,
+[data-skin="phosphor"] #sidebar,
+[data-skin="phosphor"] #editor-area,
+[data-skin="phosphor"] #welcome-screen { background: #050705; }
+[data-skin="phosphor"] #sidebar *,
+[data-skin="phosphor"] #welcome-content *,
+[data-skin="phosphor"] #statusbar * {
+    border-radius: 0 !important;
+    font-family: var(--mono) !important;
+    letter-spacing: 0.03em;
+}
+[data-skin="phosphor"] .panel-body,
+[data-skin="phosphor"] #welcome-content {
+    color: #41ff8a;
+    text-shadow: 0 0 8px rgba(65,255,138,0.45);
+}
+/* Scanlines + vignette over the shell */
+[data-skin="phosphor"] #main::after {
+    content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 50;
+    background:
+        radial-gradient(120% 90% at 50% 45%, transparent 45%, rgba(0,0,0,0.7) 100%),
+        repeating-linear-gradient(180deg, rgba(0,0,0,0.26) 0 1px, transparent 1px 3px);
+}
+[data-skin="phosphor"] #titlebar,
+[data-skin="phosphor"] #menubar,
+[data-skin="phosphor"] #statusbar {
+    background: #050705;
+    border-color: rgba(65,255,138,0.28);
+    color: #41ff8a;
+}
+[data-skin="phosphor"] #sidebar-tabs {
+    background: #050705;
+    border-right: 1px solid rgba(65,255,138,0.28);
+}
+[data-skin="phosphor"] #sidebar-tabs > * { color: rgba(65,255,138,0.6) !important; }
+[data-skin="phosphor"] #sidebar-tabs > *.active {
+    background: #41ff8a !important; color: #041006 !important; text-shadow: none;
+}
+[data-skin="phosphor"] #sidebar { border-right: 1px solid rgba(65,255,138,0.28); }
+[data-skin="phosphor"] .panel-header,
+[data-skin="phosphor"] .learn-section-title {
+    background: #050705;
+    color: rgba(65,255,138,0.55) !important;
+    border-bottom: 1px solid rgba(65,255,138,0.28);
+    font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase;
+}
+[data-skin="phosphor"] .learn-section,
+[data-skin="phosphor"] .lesson-card,
+[data-skin="phosphor"] .ach-item {
+    background: transparent;
+    border: 1px solid rgba(65,255,138,0.28);
+}
+[data-skin="phosphor"] .welcome-btn,
+[data-skin="phosphor"] .learn-action-btn {
+    background: transparent;
+    border: 1px solid rgba(65,255,138,0.5);
+    color: #41ff8a;
+    text-transform: uppercase; letter-spacing: 0.14em; font-size: 11px;
+}
+[data-skin="phosphor"] .welcome-btn:hover,
+[data-skin="phosphor"] .learn-action-btn:hover,
+[data-skin="phosphor"] .learn-action-primary {
+    background: #41ff8a; color: #041006; text-shadow: none; border-color: #41ff8a;
+}
+[data-skin="phosphor"] #welcome-content h1 {
+    text-transform: uppercase; letter-spacing: 0.16em; font-weight: 400;
+    text-shadow: 0 0 18px rgba(65,255,138,0.6);
+}
+[data-skin="phosphor"] #welcome-logo { filter: drop-shadow(0 0 14px rgba(65,255,138,0.7)); }
+[data-skin="phosphor"] .recent-name { color: #41ff8a !important; text-decoration: underline; }

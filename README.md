@@ -28,6 +28,8 @@
 
 **Project Templates** — Title (.xex), Dynamic Library (.xex), Static Library (.lib), spinning cube demo, XUI application, and XBLA title scaffold with networking and achievements.
 
+**Visual Studio Import** — Bring existing work across with `File → Import from Visual Studio (.sln)`. Reads `.sln` solutions and both project formats the XDK shipped against (`.vcxproj` and legacy `.vcproj`), carrying over sources, include paths, library paths, libraries, preprocessor defines, precompiled header, RTTI, exception handling, warning level and optimization. Multi-project solutions let you pick. Your files are **copied, never moved**, so the Visual Studio project keeps working — and a preview shows exactly what will come over before anything is written.
+
 **SDK Tools** — Integrated access to shader compiler (fxc), audio encoder (xma2encode), XUI compiler, binary inspector, PIX profiler launcher, and more — all without leaving the IDE.
 
 **Devkit Management** — Connect to a development kit over the network. Deploy builds, reboot the console, capture screenshots, browse the file system, and monitor CPU/memory usage.
@@ -37,6 +39,8 @@
 **AI Tutor** — Multi-provider AI assistant (Anthropic, OpenAI, Ollama, custom endpoints) with streaming responses, code generation, inline explain/fix/refactor actions, and proactive tutoring that adapts to your skill level.
 
 **Cinematic Learning System** — 17 interactive lessons across 8 modules covering C++ fundamentals through Xbox 360 specifics (Xenon architecture, Direct3D 9, XInput). Typing animations, token explanations, connection diagrams, adaptive mastery tracking with spaced repetition, quizzes, flashcards, study notes, and achievements.
+
+**Cloud Lessons & Progress Sync** — Browse, download and update community lessons straight from the Learn panel, with version-aware update badges. Sign in and your mastery profile follows you across machines, merging rather than overwriting.
 
 **Genesis Lab** — Self-evolving AI lesson engine that generates, critiques, and refines lessons through iterative evolution. Persistent across sessions with HTML export.
 
@@ -49,6 +53,10 @@
 **Discord Community** — Built-in Discord feed to browse threads, post questions, and share downloads without leaving the IDE.
 
 **Extensions** — Install community tools, templates, snippet packs, themes, and plugins from `.zip` files or folders.
+
+**Skins** — Three structural skins that restyle the interface itself, not just the accent colour (`Settings → Appearance`): **Blade** (the 2005 Xbox 360 dashboard — sliding blades and ring-of-light glow), **Devkit** (the IDE as hardware — brushed chassis, keycap rail, status LEDs), and **Phosphor** (CRT terminal — monospace, scanlines, phosphor bloom). Colour presets still apply on top.
+
+**Software Updates** — The IDE checks for new releases and shows what changed. Downloads are SHA-256 verified against the signed manifest before anything is executed.
 
 **SVG Icon System** — All UI icons are hand-crafted SVGs that render consistently on Windows 7 through 11 without depending on system emoji fonts.
 
@@ -113,6 +121,7 @@ src/
 │   ├── toolchain.ts         # SDK detection & tool path resolution
 │   ├── buildSystem.ts       # Compiler, linker, XEX packaging pipeline
 │   ├── projectManager.ts    # Project templates, create/open/save
+│   ├── vsImporter.ts        # Visual Studio .sln/.vcxproj/.vcproj import
 │   ├── devkit.ts            # Development kit connection & management
 │   ├── emulator.ts          # Emulator launch, debug, breakpoints
 │   ├── sdkTools.ts          # Shader, audio, XUI, binary tool wrappers

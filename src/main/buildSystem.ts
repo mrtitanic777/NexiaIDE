@@ -37,6 +37,7 @@ export class BuildSystem {
     private toolchain: Toolchain;
     private currentProcess: ChildProcess | null = null;
     private onOutput: ((data: string) => void) | null = null;
+    private building = false;
 
     constructor(toolchain: Toolchain) {
         this.toolchain = toolchain;
@@ -64,10 +65,38 @@ export class BuildSystem {
         return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}.${frac}`;
     }
 
+    /** Whether a build is currently running. */
+    get isBuilding(): boolean { return this.building; }
+
     /**
      * Full build: compile all sources → link → produce XEX.
+     *
+     * Serialized — only one build may run at a time. A second concurrent
+     * invocation (e.g. a second F7 before the first finishes) returns
+     * immediately instead of corrupting shared state: the single
+     * `currentProcess` handle, the fixed-name `link.rsp`/`lib.rsp`, and the
+     * shared output directory would otherwise be written by two builds at once.
      */
     async build(project: ProjectConfig, config?: Partial<BuildConfig>): Promise<BuildResult> {
+        if (this.building) {
+            this.emit('1>------ Build skipped: another build is already in progress ------\n');
+            return {
+                success: false,
+                errors: [{ file: '', line: 0, column: 0, message: 'A build is already in progress.', severity: 'error' }],
+                warnings: [],
+                output: '',
+                duration: 0,
+            };
+        }
+        this.building = true;
+        try {
+            return await this.runBuild(project, config);
+        } finally {
+            this.building = false;
+        }
+    }
+
+    private async runBuild(project: ProjectConfig, config?: Partial<BuildConfig>): Promise<BuildResult> {
         const startTime = Date.now();
         const errors: BuildMessage[] = [];
         const warnings: BuildMessage[] = [];
@@ -151,6 +180,13 @@ export class BuildSystem {
         let compiledCount = 0;
         let skippedCount = 0;
 
+        // Newest modification time across all project headers. A header-only
+        // edit doesn't bump any .cpp mtime, so without this an unchanged source
+        // would be judged up-to-date and a STALE .obj linked ("works after
+        // Rebuild but not Build"). Treat every source as dirty if any header is
+        // newer than its .obj — a conservative full-recompile on header change.
+        const newestHeaderMtime = this.newestHeaderMtime(project);
+
         if (sourceFiles.length > 0) {
             this.emit(`1>ClCompile:\n`);
 
@@ -164,8 +200,9 @@ export class BuildSystem {
                 if (!fs.existsSync(objPath)) return true;
                 if (pchRebuilt) return true;  // PCH changed → everything recompiles
                 try {
-                    const srcMtime = fs.statSync(srcPath).mtimeMs;
                     const objMtime = fs.statSync(objPath).mtimeMs;
+                    if (newestHeaderMtime > objMtime) return true;  // a header changed
+                    const srcMtime = fs.statSync(srcPath).mtimeMs;
                     return srcMtime > objMtime;
                 } catch {
                     return true;
@@ -192,6 +229,9 @@ export class BuildSystem {
                             const hdrMtime = fs.statSync(pchHeaderPath).mtimeMs;
                             if (hdrMtime > pchObjMtime) pchNeedsRebuild = true;
                         }
+                        // Any project header newer than the PCH .obj invalidates it
+                        // (the PCH transitively includes them).
+                        if (newestHeaderMtime > pchObjMtime) pchNeedsRebuild = true;
                     } catch {
                         pchNeedsRebuild = true;
                     }
@@ -400,7 +440,13 @@ export class BuildSystem {
 
         const outputExt = project.type === 'library' ? '.lib' : '.xex';
         const outputFile = path.join(buildConfig.outputDir, project.name + outputExt);
-        return { success, errors, warnings, output: fullOutput, duration, outputFile: success ? outputFile : undefined };
+        // Only report an output path if the artifact actually exists. An empty
+        // project (no sources → no link step) otherwise "succeeds" and returns
+        // a path to a non-existent .xex, which makes Run/Deploy fail with a
+        // confusing "XEX not found".
+        let outputExists = false;
+        try { outputExists = fs.existsSync(outputFile); } catch {}
+        return { success, errors, warnings, output: fullOutput, duration, outputFile: success && outputExists ? outputFile : undefined };
     }
 
     private emitFailure(project: ProjectConfig, errors: BuildMessage[], warnings: BuildMessage[], duration: number, unsuccessfulMarker: string) {
@@ -827,6 +873,55 @@ export class BuildSystem {
             this.currentProcess = null;
             this.emit('\n========== Build: cancelled ==========\n');
         }
+    }
+
+    /**
+     * Return the newest mtime (ms) among all header files the project could
+     * include: everything under src/, loose headers in the project root, and
+     * any configured include directories. Returns 0 if none are found.
+     *
+     * Used to detect header-only edits, which don't change any .cpp mtime.
+     */
+    private newestHeaderMtime(project: ProjectConfig): number {
+        const HEADER_RE = /\.(h|hpp|hxx|hh|inl|ipp)$/i;
+        let newest = 0;
+        const visited = new Set<string>();
+        const scanDir = (dir: string, depth: number) => {
+            if (depth > 16) return;
+            let entries: fs.Dirent[];
+            try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+            for (const entry of entries) {
+                const full = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                    if (['out', 'obj', '.git', 'node_modules'].includes(entry.name)) continue;
+                    const key = process.platform === 'win32' ? full.toLowerCase() : full;
+                    if (visited.has(key)) continue;
+                    visited.add(key);
+                    scanDir(full, depth + 1);
+                } else if (HEADER_RE.test(entry.name)) {
+                    try {
+                        const m = fs.statSync(full).mtimeMs;
+                        if (m > newest) newest = m;
+                    } catch {}
+                }
+            }
+        };
+        scanDir(path.join(project.path, 'src'), 0);
+        try {
+            for (const entry of fs.readdirSync(project.path, { withFileTypes: true })) {
+                if (!entry.isDirectory() && HEADER_RE.test(entry.name)) {
+                    try {
+                        const m = fs.statSync(path.join(project.path, entry.name)).mtimeMs;
+                        if (m > newest) newest = m;
+                    } catch {}
+                }
+            }
+        } catch {}
+        for (const inc of (project.includeDirectories || [])) {
+            const incPath = path.isAbsolute(inc) ? inc : path.join(project.path, inc);
+            scanDir(incPath, 0);
+        }
+        return newest;
     }
 
     /**

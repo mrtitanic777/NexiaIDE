@@ -425,11 +425,16 @@ $h = [K32]::OpenProcess(0x1F0FFF, $false, ${this.targetPid})
 [K32]::CloseHandle($h)
 `;
             fs.writeFileSync(scriptPath, script, 'utf8');
-            execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`, {
-                windowsHide: true,
-                timeout: 5000,
-            });
-            try { fs.unlinkSync(scriptPath); } catch {}
+            try {
+                execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`, {
+                    windowsHide: true,
+                    timeout: 5000,
+                });
+            } finally {
+                // Always remove the temp script, even if execSync threw (timeout
+                // / ExecutionPolicy), otherwise nexia_dbgbreak_*.ps1 accumulate.
+                try { fs.unlinkSync(scriptPath); } catch {}
+            }
         } catch (err: any) {
             this.emit(`[GDB] DebugBreakProcess failed: ${err.message}\n`);
             // Fallback to MI command

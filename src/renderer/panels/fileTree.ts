@@ -252,7 +252,7 @@ function createVirtualFolder(name: string, icon: string, files: any[], depth: nu
                 { label: 'Delete', action: () => deleteFile(file.path) },
                 { label: '─', action: () => {} },
                 { label: 'Copy Path', action: () => { navigator.clipboard.writeText(file.path); } },
-                { label: 'Reveal in Explorer', action: () => { shell.showItemInFolder(file.path); } },
+                { label: 'Reveal in Explorer', action: () => { _shell.showItemInFolder(file.path); } },
             ]);
         });
         fi.draggable = true;
@@ -492,7 +492,7 @@ function renderFileTree(nodes: any[], container: HTMLElement, depth: number, cle
                     { label: 'Delete', action: () => deleteFile(node.path) },
                     { label: '─', action: () => {} },
                     { label: 'Copy Path', action: () => { navigator.clipboard.writeText(node.path); } },
-                    { label: 'Reveal in Explorer', action: () => { shell.showItemInFolder(node.path); } },
+                    { label: 'Reveal in Explorer', action: () => { _shell.showItemInFolder(node.path); } },
                 ]);
             });
 

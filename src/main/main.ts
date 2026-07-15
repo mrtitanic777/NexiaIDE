@@ -14,6 +14,7 @@ import { SdkTools } from './sdkTools';
 import { ExtensionManager } from './extensions';
 import { ProjectManager } from './projectManager';
 import { DiscordFeed } from './discord';
+import { parseSolution, parseVsProject, importVsProject } from './vsImporter';
 import { IPC } from '../shared/types';
 
 // ── Services ──
@@ -407,6 +408,10 @@ function registerIpcHandlers() {
         return result;
     });
 
+    ipcMain.handle(IPC.BUILD_CANCEL, async () => {
+        buildSystem.cancel();
+    });
+
     // ── SDK Tools ──
     ipcMain.handle(IPC.TOOL_COMPILE_SHADER, async (_e, input: string, output: string, profile: string, entry: string) => {
         return sdkTools.compileShader(input, output, profile, entry);
@@ -685,16 +690,242 @@ function registerIpcHandlers() {
         return { success: true };
     });
 
+    // ══════════════════════════════════════
+    //  VISUAL STUDIO IMPORT
+    // ══════════════════════════════════════
+
+    /** Pick a .sln/.vcxproj/.vcproj and list the importable projects inside it. */
+    ipcMain.handle(IPC.VS_PICK, async () => {
+        const result = await dialog.showOpenDialog(mainWindow!, {
+            title: 'Import from Visual Studio',
+            filters: [
+                { name: 'Visual Studio Solution or Project', extensions: ['sln', 'vcxproj', 'vcproj'] },
+                { name: 'Solution (*.sln)', extensions: ['sln'] },
+                { name: 'Project (*.vcxproj, *.vcproj)', extensions: ['vcxproj', 'vcproj'] },
+            ],
+            properties: ['openFile'],
+        });
+        if (result.canceled || !result.filePaths.length) return { success: false, error: 'Cancelled' };
+
+        const picked = result.filePaths[0];
+        try {
+            if (/\.sln$/i.test(picked)) {
+                const info = parseSolution(picked);
+                if (!info.projects.length) {
+                    // Almost always a C#/.NET solution — say so instead of a blank "nothing found".
+                    const raw = fs.readFileSync(picked, 'utf-8');
+                    const other = (raw.match(/\.(csproj|vbproj|fsproj|pyproj)"/gi) || []).length;
+                    return {
+                        success: false,
+                        error: other
+                            ? `No C/C++ projects in that solution — it contains ${other} .NET project(s), which Nexia can't build for Xbox 360.`
+                            : 'That solution has no C/C++ (.vcxproj/.vcproj) projects in it.',
+                    };
+                }
+                return { success: true, kind: 'sln', solutionPath: picked, name: info.name, projects: info.projects };
+            }
+            return {
+                success: true, kind: 'proj', solutionPath: null,
+                name: path.basename(picked, path.extname(picked)),
+                projects: [{ name: path.basename(picked, path.extname(picked)), path: picked, exists: true }],
+            };
+        } catch (err: any) {
+            return { success: false, error: err.message };
+        }
+    });
+
+    /** Parse a project and report what WOULD be imported — nothing is written. */
+    ipcMain.handle(IPC.VS_PREVIEW, async (_e, projectPath: string) => {
+        try {
+            const p = parseVsProject(projectPath);
+            return {
+                success: true,
+                preview: {
+                    name: p.name, format: p.format, type: p.type,
+                    sourceCount: p.sources.length,
+                    headerCount: p.headers.length,
+                    otherCount: p.otherFiles.length,
+                    includeDirectories: p.includeDirectories,
+                    libraries: p.libraries,
+                    defines: p.defines,
+                    pchHeader: p.pchHeader,
+                    warningLevel: p.warningLevel,
+                    exceptionHandling: p.exceptionHandling,
+                    enableRtti: p.enableRtti,
+                    optimizationOverride: p.optimizationOverride,
+                    warnings: p.warnings,
+                },
+            };
+        } catch (err: any) {
+            return { success: false, error: err.message };
+        }
+    });
+
+    /** Do the import: copy sources into a new Nexia project and write nexia.json. */
+    ipcMain.handle(IPC.VS_IMPORT, async (_e, opts: { projectPath: string; destDir?: string; name?: string }) => {
+        try {
+            let destDir = opts.destDir;
+            if (!destDir) {
+                const r = await dialog.showOpenDialog(mainWindow!, {
+                    title: 'Where should the imported project go?',
+                    properties: ['openDirectory', 'createDirectory'],
+                });
+                if (r.canceled || !r.filePaths.length) return { success: false, error: 'Cancelled' };
+                destDir = r.filePaths[0];
+            }
+            const report = importVsProject(opts.projectPath, destDir, opts.name);
+            // Make it the open project so the user lands straight in it.
+            await projectManager.open(report.config.path);
+            return { success: true, report };
+        } catch (err: any) {
+            return { success: false, error: err.message };
+        }
+    });
+
+    // ══════════════════════════════════════
+    //  SOFTWARE UPDATES
+    // ══════════════════════════════════════
+
+    ipcMain.handle('app:version', () => app.getVersion());
+
+    /**
+     * Download a release installer to temp, reporting progress and verifying
+     * the SHA-256 digest. We never execute a binary whose hash doesn't match
+     * the signed manifest — a hijacked downloadUrl would otherwise be RCE.
+     */
+    ipcMain.handle('update:download', async (e, opts: { url: string; sha256?: string | null; version: string }) => {
+        const https = require('https');
+        const crypto = require('crypto');
+        const os = require('os');
+
+        if (!/^https:\/\//i.test(opts?.url || '')) {
+            return { success: false, error: 'Refusing to download from a non-HTTPS URL' };
+        }
+
+        const dest = path.join(os.tmpdir(), `NexiaSetup-${opts.version || 'latest'}.exe`);
+
+        return await new Promise((resolve) => {
+            const doGet = (url: string, redirects = 0) => {
+                if (redirects > 5) return resolve({ success: false, error: 'Too many redirects' });
+                https.get(url, { headers: { 'User-Agent': 'NexiaIDE-Updater' } }, (res: any) => {
+                    // Follow redirects (CDNs love them)
+                    if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                        res.resume();
+                        return doGet(res.headers.location, redirects + 1);
+                    }
+                    if (res.statusCode !== 200) {
+                        res.resume();
+                        return resolve({ success: false, error: `Download failed (HTTP ${res.statusCode})` });
+                    }
+
+                    const total = parseInt(res.headers['content-length'] || '0', 10);
+                    let received = 0;
+                    const hash = crypto.createHash('sha256');
+                    const file = fs.createWriteStream(dest);
+
+                    res.on('data', (chunk: Buffer) => {
+                        received += chunk.length;
+                        hash.update(chunk);
+                        if (total > 0 && !e.sender.isDestroyed()) {
+                            e.sender.send('update:progress', {
+                                received, total, pct: Math.round((received / total) * 100),
+                            });
+                        }
+                    });
+                    res.pipe(file);
+                    file.on('finish', () => {
+                        file.close(() => {
+                            const digest = hash.digest('hex');
+                            if (opts.sha256 && digest.toLowerCase() !== String(opts.sha256).toLowerCase()) {
+                                try { fs.unlinkSync(dest); } catch {}
+                                return resolve({ success: false, error: 'Checksum mismatch — download rejected.' });
+                            }
+                            resolve({ success: true, path: dest, sha256: digest, size: received });
+                        });
+                    });
+                    file.on('error', (err: any) => resolve({ success: false, error: err.message }));
+                }).on('error', (err: any) => resolve({ success: false, error: err.message }));
+            };
+            doGet(opts.url);
+        });
+    });
+
+    /** Launch the downloaded installer and quit so it can replace the app. */
+    ipcMain.handle('update:install', async (_e, filePath: string) => {
+        try {
+            if (!filePath || !fs.existsSync(filePath)) return { success: false, error: 'Installer not found' };
+            const { spawn } = require('child_process');
+            const child = spawn(filePath, [], { detached: true, stdio: 'ignore' });
+            child.unref();
+            setTimeout(() => app.quit(), 400);
+            return { success: true };
+        } catch (err: any) {
+            return { success: false, error: err.message };
+        }
+    });
+
     ipcMain.handle(IPC.DISCORD_CHECK_GUILDS, async () => {
+        // Ask the BOT first — it's authoritative and doesn't depend on the user's
+        // OAuth scopes. Only if it can't answer do we fall back to reading the
+        // user's own guild list. Every path reports `determined`, because
+        // "couldn't check" must never be rendered as "you haven't joined".
+        try {
+            const authed = discordFeed.getAuthUser();
+            if (authed?.id) {
+                const verdict = await discordFeed.isUserInGuild(authed.id);
+                if (verdict !== null) {
+                    return { success: true, determined: true, inNexiaServer: verdict, matchedBy: 'bot' };
+                }
+            }
+        } catch { /* fall through to the user-token route */ }
+
         try {
             const guilds = await discordFeed.fetchUserGuilds();
-            const NEXIA_SERVER_NAME = 'The Official Nexia Server';
-            const found = guilds.some((g: any) =>
-                g.name === NEXIA_SERVER_NAME || g.name?.toLowerCase() === NEXIA_SERVER_NAME.toLowerCase()
-            );
-            return { success: true, inNexiaServer: found, guilds: guilds.map((g: any) => g.name) };
+
+            // No guild data = no `guilds` scope, expired token, or empty response.
+            // That's "unknown", not "not a member".
+            if (!Array.isArray(guilds) || guilds.length === 0) {
+                return { success: true, determined: false, inNexiaServer: false, reason: 'no-guild-data' };
+            }
+
+            // Prefer an exact guild-ID match — the ID is immutable, whereas the
+            // server NAME can be renamed/emoji'd and silently break the check
+            // (which made members read as "not joined"). Resolve the Nexia guild
+            // id from the configured forum channel (via the bot, if a token is
+            // set) or from NEXIA_DISCORD_GUILD_ID; fall back to a tolerant name
+            // match so it still works when neither id source is available.
+            let nexiaGuildId: string | null = null;
+            try { nexiaGuildId = await discordFeed.getGuildId(); } catch {}
+            if (!nexiaGuildId) nexiaGuildId = process.env.NEXIA_DISCORD_GUILD_ID || null;
+
+            let found = false;
+            let matchedBy = 'none';
+            if (nexiaGuildId) {
+                found = guilds.some((g: any) => String(g.id) === String(nexiaGuildId));
+                if (found) matchedBy = 'id';
+            }
+            if (!found) {
+                // Tolerant name match: strip case/punctuation/whitespace and
+                // accept any server whose name contains "nexia".
+                const norm = (s: string) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                found = guilds.some((g: any) => {
+                    const n = norm(g.name);
+                    return n.includes('nexia') || n === norm('The Official Nexia Server');
+                });
+                if (found) matchedBy = 'name';
+            }
+
+            return {
+                success: true,
+                determined: true,
+                inNexiaServer: found,
+                matchedBy,
+                nexiaGuildId,
+                guilds: guilds.map((g: any) => ({ id: g.id, name: g.name })),
+            };
         } catch (err: any) {
-            return { success: false, inNexiaServer: false, error: err.message };
+            // Network/API failure — we simply don't know. Don't accuse the user.
+            return { success: false, determined: false, inNexiaServer: false, error: err.message };
         }
     });
 
@@ -1327,6 +1558,21 @@ app.whenReady().then(async () => {
     registerIpcHandlers();
     createWindow();
 });
+
+// Tear down background work on quit so nothing survives the app: in-flight
+// builds (cl.exe/link.exe), the detached emulator + its GDB, devkit sockets,
+// and the Discord OAuth callback server.
+let cleanedUp = false;
+function cleanupServices() {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    try { buildSystem?.cancel(); } catch {}
+    try { emulatorManager?.stop(); } catch {}
+    try { devkitManager?.disconnect(); } catch {}
+    try { discordFeed?.cleanup(); } catch {}
+}
+
+app.on('before-quit', cleanupServices);
 
 app.on('window-all-closed', () => {
     app.quit();

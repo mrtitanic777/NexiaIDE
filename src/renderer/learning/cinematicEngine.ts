@@ -219,6 +219,15 @@ function processLesson(blocks: any[]) {
 
 let run = false;
 let dead = false;
+/**
+ * Monotonic run token. Every start/replay captures `++runToken` at the top of
+ * the sequence; stop()/unmount()/replay bump it. The sl() helper and every loop
+ * iteration compare their captured token against this — a mismatch means a newer
+ * run (or teardown) began, so stale already-scheduled setTimeout/RAF/Promise
+ * continuations from the previous run abort instead of animating against a
+ * torn-down or reset DOM. The `dead` flag is kept working alongside it.
+ */
+let runToken = 0;
 let doneC = 0;
 let t0 = 0;
 let usrScr = false;
@@ -291,7 +300,15 @@ function spd(): number {
 }
 
 function sl(ms: number): Promise<void> {
-    return new Promise(r => { setTimeout(r, ms / spd()); if (dead) r(); });
+    // Capture the run token at call time. If a newer run started (or teardown
+    // bumped the token) — or the sequence was marked dead — resolve immediately
+    // so the stale continuation unwinds instead of resuming the old sequence.
+    // The awaiting caller re-checks `dead`/`runToken` right after each await.
+    const myRun = runToken;
+    return new Promise(r => {
+        setTimeout(r, ms / spd());
+        if (dead || myRun !== runToken) r();
+    });
 }
 
 // ── Spotlight System ──
@@ -541,8 +558,12 @@ async function showBlockArrow(conn: { src: number[]; dst: number[]; label: strin
 // ── Show Explanation Panel ──
 
 function showExplain(blockId: string): Promise<void> {
+    // Capture the run token so a stop/replay/unmount during the panel's deferred
+    // build (or while it is shown) aborts instead of rendering against a reset DOM.
+    const myRun = runToken;
     return new Promise(resolve => {
         const ex = activeExpl[blockId]; if (!ex) { resolve(); return; }
+        if (dead || myRun !== runToken) { resolve(); return; }
         const blk = blockMap[blockId];
         setSpotRange(blk._start!, blk._end!);
         if (!usrScr) {
@@ -551,6 +572,8 @@ function showExplain(blockId: string): Promise<void> {
         }
 
         setTimeout(() => {
+            // Stale run? Bail without building the panel and let the awaiter unwind.
+            if (dead || myRun !== runToken) { resolve(); return; }
             clearTimeout(expTimeout!);
             const hasVis = blockId in activeBlockVis;
             const ctrls = activeVisControls[blockId] || [];
@@ -771,6 +794,9 @@ function showExplain(blockId: string): Promise<void> {
 
 async function runTokenExplain(blockId: string, blk: LessonBlock) {
     const tokenData = activeTokens[blockId]; if (!tokenData) return;
+    // Capture the run token: a stop/replay/unmount during token-explain must
+    // abort this loop rather than animate against a superseded DOM.
+    const myRun = runToken;
 
     let allTokens: { lineIdx: number; text: string; desc: string }[] = [];
     tokenData.forEach(td => {
@@ -779,7 +805,7 @@ async function runTokenExplain(blockId: string, blk: LessonBlock) {
     });
 
     for (let ti = 0; ti < allTokens.length; ti++) {
-        if (dead) break;
+        if (dead || myRun !== runToken) break;
         const tok = allTokens[ti];
         const lineEl = document.getElementById('ct-l' + tok.lineIdx); if (!lineEl) continue;
 
@@ -919,7 +945,7 @@ async function runTokenExplain(blockId: string, blk: LessonBlock) {
         setTimeout(() => { tPath.remove(); tDotS.remove(); tDotD.remove(); }, 250);
         lineEl.innerHTML = origHTML;
         miniExpEl.classList.remove('ct-v');
-        if (action === 'skip' || dead) break;
+        if (action === 'skip' || dead || myRun !== runToken) break;
         await sl(T().animations.tokenStep);
     }
 
@@ -930,8 +956,8 @@ async function runTokenExplain(blockId: string, blk: LessonBlock) {
 
 // ── Typing Engine ──
 
-async function typeBlock(blk: LessonBlock) {
-    if (dead) return;
+async function typeBlock(blk: LessonBlock, myRun: number = runToken) {
+    if (dead || myRun !== runToken) return;
     const startIdx = blk._start!;
 
     if (((blk as any).section || (blk as any).sec)) {
@@ -944,7 +970,7 @@ async function typeBlock(blk: LessonBlock) {
     }
 
     for (let li = 0; li < blk.lines.length; li++) {
-        if (dead) return;
+        if (dead || myRun !== runToken) return;
         const data = blk.lines[li];
         const idx = startIdx + li;
         const num = idx + 1;
@@ -976,7 +1002,7 @@ async function typeBlock(blk: LessonBlock) {
         const hlFull = hl(txt);
 
         for (let i = 0; i < txt.length; i++) {
-            if (dead) return;
+            if (dead || myRun !== runToken) return;
             el.innerHTML = esc(txt.substring(0, i + 1)) + '<span class="ct-cur"></span>';
             if (!_layoutXMeasured) _measureLayoutOffset(el);
             sndKeystroke(); doneC++; updProg();
@@ -1013,11 +1039,12 @@ async function typeBlock(blk: LessonBlock) {
 
     if (activeConnections[blk.id]) {
         for (const conn of activeConnections[blk.id]) {
-            if (dead) break;
+            if (dead || myRun !== runToken) break;
             await showBlockArrow(conn);
         }
     }
 
+    if (dead || myRun !== runToken) return;
     if (activeExpl[blk.id]) await showExplain(blk.id);
 }
 
@@ -1052,6 +1079,9 @@ async function startSequence() {
         badge.textContent = 'NO CONTENT'; badge.className = 'ct-badge ct-idle';
         return;
     }
+    // Claim a fresh run token. Any prior in-flight chain (whose continuations
+    // were already scheduled) now holds a stale token and will abort.
+    const myRun = ++runToken;
     initAudio();
     run = true; dead = false; doneC = 0; usrScr = false; spotStart = null; spotEnd = null; curLine = null;
     _layoutXMeasured = false; _layoutXOffset = 0;
@@ -1063,21 +1093,26 @@ async function startSequence() {
     t0 = Date.now();
 
     await erasePhase();
-    if (dead) { finish(); return; }
+    if (dead || myRun !== runToken) { if (myRun === runToken) finish(); return; }
 
     badge.textContent = 'WRITING'; badge.className = 'ct-badge ct-on';
     vig.classList.add('ct-on');
     rbar.classList.add('ct-v');
 
     for (const blk of activeBlocks) {
-        if (dead) break;
-        await typeBlock(blk);
+        if (dead || myRun !== runToken) break;
+        await typeBlock(blk, myRun);
         await sl(T().pauses.blockGap);
     }
-    finish();
+    // Only the current run may finalize — a superseded run must not touch the DOM
+    // that the newer run now owns.
+    if (myRun === runToken) finish();
 }
 
-function stopSequence() { dead = true; }
+// Bump the run token so any in-flight chain aborts at its next checkpoint, then
+// finalize the UI directly: with the token bumped, the (now stale) awaiting loop
+// won't call finish() itself.
+function stopSequence() { if (!run) { dead = true; return; } dead = true; runToken++; finish(); }
 
 function finish() {
     run = false; vig.classList.remove('ct-on');
@@ -1332,7 +1367,11 @@ export function mount(container: HTMLElement) {
 
     // Wire controls
     bPlay.onclick = () => startSequence();
-    bStop.onclick = () => { dead = true; };
+    // Stop: stopSequence() marks dead, bumps the run token so any already-scheduled
+    // continuation aborts at its next checkpoint, and finalizes the UI.
+    bStop.onclick = () => stopSequence();
+    // Replay: clear dead, then startSequence() claims a fresh token which
+    // invalidates any lingering continuation from the previous run.
     bReplay.onclick = () => { dead = false; startSequence(); };
 
     spdR.oninput = () => {
@@ -1357,6 +1396,9 @@ export function mount(container: HTMLElement) {
 export function unmount() {
     if (!_mounted) return;
     dead = true;
+    // Invalidate any in-flight run so stale scheduled continuations abort instead
+    // of resuming against the torn-down DOM.
+    runToken++;
     finish();
     disposeAll();
     if (rootContainer) rootContainer.innerHTML = '';

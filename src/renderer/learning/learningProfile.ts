@@ -321,6 +321,119 @@ export class LearningProfile {
         }
     }
 
+    // ── Cloud Sync (snapshot serialize + merge) ──
+
+    /**
+     * Serialize the full profile to a plain JSON-safe object for cloud sync.
+     * Unlike save() (which trims untouched concepts to save disk), this includes
+     * everything needed to reconstruct the profile on another device, plus a
+     * `syncVersion` for forward-compat.
+     */
+    serialize(): any {
+        const conceptObj: Record<string, ConceptProgress> = {};
+        for (const [id, cp] of this.conceptProgress) {
+            if (cp.level !== MasteryLevel.NotStarted || cp.timesIntroduced > 0 || cp.timesPracticed > 0) {
+                conceptObj[id] = cp;
+            }
+        }
+        const lessonObj: Record<string, LessonProgress> = {};
+        for (const [id, lp] of this.lessonProgress) {
+            if (lp.started) lessonObj[id] = lp;
+        }
+        return {
+            syncVersion: 1,
+            learnerName: this.learnerName,
+            sessionCount: this.sessionCount,
+            totalLearningTimeSeconds: this.totalLearningTimeSeconds,
+            conceptProgress: conceptObj,
+            lessonProgress: lessonObj,
+        };
+    }
+
+    /**
+     * Merge a cloud snapshot into the current in-memory profile.
+     *
+     * Progress is monotonic (counters only increase, lessons only get more
+     * complete), so we take the field-wise MAX rather than last-writer-wins.
+     * This makes multi-device sync conflict-free: whichever device did more of
+     * a given thing wins that field, and interaction history is unioned.
+     *
+     * Returns true if anything changed (so the caller can persist + re-render).
+     */
+    mergeSnapshot(snapshot: any): boolean {
+        if (!snapshot || typeof snapshot !== 'object') return false;
+        let changed = false;
+
+        if (snapshot.learnerName && !this.learnerName) { this.learnerName = snapshot.learnerName; changed = true; }
+        if (typeof snapshot.sessionCount === 'number' && snapshot.sessionCount > this.sessionCount) {
+            this.sessionCount = snapshot.sessionCount; changed = true;
+        }
+        if (typeof snapshot.totalLearningTimeSeconds === 'number' && snapshot.totalLearningTimeSeconds > this.totalLearningTimeSeconds) {
+            this.totalLearningTimeSeconds = snapshot.totalLearningTimeSeconds; changed = true;
+        }
+
+        // Concepts: field-wise max, unioned + de-duplicated history.
+        if (snapshot.conceptProgress && typeof snapshot.conceptProgress === 'object') {
+            for (const [id, raw] of Object.entries(snapshot.conceptProgress)) {
+                const c = raw as any;
+                const local = this.conceptProgress.get(id);
+                if (!local) {
+                    this.conceptProgress.set(id, {
+                        conceptId: id,
+                        conceptName: c.conceptName || id,
+                        level: c.level ?? MasteryLevel.NotStarted,
+                        timesIntroduced: c.timesIntroduced || 0,
+                        timesPracticed: c.timesPracticed || 0,
+                        successfulAttempts: c.successfulAttempts || 0,
+                        failedAttempts: c.failedAttempts || 0,
+                        totalTimeSpentSeconds: c.totalTimeSpentSeconds || 0,
+                        lastInteraction: c.lastInteraction || 0,
+                        history: Array.isArray(c.history) ? c.history.slice() : [],
+                    });
+                    changed = true;
+                    continue;
+                }
+                const before = JSON.stringify(local);
+                local.level = Math.max(local.level, c.level ?? 0);
+                local.timesIntroduced = Math.max(local.timesIntroduced, c.timesIntroduced || 0);
+                local.timesPracticed = Math.max(local.timesPracticed, c.timesPracticed || 0);
+                local.successfulAttempts = Math.max(local.successfulAttempts, c.successfulAttempts || 0);
+                local.failedAttempts = Math.max(local.failedAttempts, c.failedAttempts || 0);
+                local.totalTimeSpentSeconds = Math.max(local.totalTimeSpentSeconds, c.totalTimeSpentSeconds || 0);
+                local.lastInteraction = Math.max(local.lastInteraction, c.lastInteraction || 0);
+                // Union history by timestamp (records are immutable once created).
+                if (Array.isArray(c.history) && c.history.length) {
+                    const seen = new Set(local.history.map(h => h.timestamp));
+                    for (const h of c.history) if (!seen.has(h.timestamp)) local.history.push(h);
+                    local.history.sort((a, b) => a.timestamp - b.timestamp);
+                }
+                if (JSON.stringify(local) !== before) changed = true;
+            }
+        }
+
+        // Lessons: OR completion, max the counters, keep earliest start / latest finish.
+        if (snapshot.lessonProgress && typeof snapshot.lessonProgress === 'object') {
+            for (const [id, raw] of Object.entries(snapshot.lessonProgress)) {
+                const l = raw as any;
+                const local = this.lessonProgress.get(id);
+                if (!local) { this.lessonProgress.set(id, l as LessonProgress); changed = true; continue; }
+                const before = JSON.stringify(local);
+                local.started = local.started || !!l.started;
+                local.completed = local.completed || !!l.completed;
+                local.contentItemsCompleted = Math.max(local.contentItemsCompleted, l.contentItemsCompleted || 0);
+                local.totalContentItems = Math.max(local.totalContentItems, l.totalContentItems || 0);
+                local.completionPercentage = Math.max(local.completionPercentage, l.completionPercentage || 0);
+                local.totalTimeSpentSeconds = Math.max(local.totalTimeSpentSeconds, l.totalTimeSpentSeconds || 0);
+                local.attempts = Math.max(local.attempts, l.attempts || 0);
+                if (l.startTime && (!local.startTime || l.startTime < local.startTime)) local.startTime = l.startTime;
+                if (l.completionTime && l.completionTime > local.completionTime) local.completionTime = l.completionTime;
+                if (JSON.stringify(local) !== before) changed = true;
+            }
+        }
+
+        return changed;
+    }
+
     // ── Recording Interactions ──
 
     /**
@@ -480,14 +593,28 @@ export class LearningProfile {
     /**
      * Get overall learning progress as a percentage (0-100).
      * Based on lesson completion: completedLessons / totalLessons * 100.
+     *
+     * The denominator should be the TOTAL number of lessons in the curriculum,
+     * not just the lessons the user has started. Pass `totalLessons` (e.g. the
+     * curriculum lesson count from lessonSystem) to get an accurate figure —
+     * finishing one of N lessons then reads as 1/N, not 1/1 = 100%.
+     *
+     * When `totalLessons` is omitted (or not a positive number), this falls back
+     * to the legacy behavior of dividing by the number of started lessons.
+     * Callers that know the curriculum size should pass it.
+     *
+     * @param totalLessons - Total lessons in the curriculum (optional)
      */
-    getOverallProgress(): number {
+    getOverallProgress(totalLessons?: number): number {
         let completed = 0;
-        let total = 0;
+        let started = 0;
         for (const [, progress] of this.lessonProgress) {
-            total++;
+            started++;
             if (progress.completed) completed++;
         }
+        const total = (typeof totalLessons === 'number' && totalLessons > 0)
+            ? totalLessons
+            : started;
         return total > 0 ? (100.0 * completed / total) : 0;
     }
 
@@ -610,12 +737,12 @@ export class LearningProfile {
     getAIContextSummary(): string {
         const pattern = this.analyzePatterns();
         const needsPractice = this.getConceptsNeedingPractice();
-        const overallProgress = this.getOverallProgress();
         const hours = this.getTotalTimeSpentHours();
         const recommended = this.getRecommendedNextLesson();
 
         // Lazy require to avoid circular dependency
         let currentLessonInfo = '';
+        let totalLessons: number | undefined;
         try {
             const { lessonSystem } = require('./lessonSystem');
             const lesson = lessonSystem.getCurrentLesson();
@@ -624,7 +751,16 @@ export class LearningProfile {
             if (lesson) {
                 currentLessonInfo = `CURRENT LESSON: ${modId} / ${lesson.title} (Step ${contentIdx + 1} of ${lesson.content.length})`;
             }
+            // Derive the curriculum's total lesson count so overall progress is
+            // measured against the whole curriculum, not just started lessons.
+            const curriculum = lessonSystem.getActiveCurriculum();
+            if (curriculum && Array.isArray(curriculum.modules)) {
+                totalLessons = curriculum.modules.reduce(
+                    (sum: number, mod: any) => sum + (mod.lessons?.length || 0), 0);
+            }
         } catch (e) { /* lessonSystem not loaded yet */ }
+
+        const overallProgress = this.getOverallProgress(totalLessons);
 
         // Categorize concepts by mastery level
         const mastered: string[] = [];

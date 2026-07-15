@@ -25,6 +25,7 @@ let _getCurrentProject: () => any = () => null;
 let _getUserSettings: () => any = () => ({});
 let _renderLearnPanel: () => void = () => {};
 let _tutorOnQuizFail: (cat: string, q: string) => void = () => {};
+let _recordLearning: (conceptId: string, type: 'lesson' | 'exercise' | 'quiz' | 'chat', successful: boolean) => void = () => {};
 
 export function initStudy(deps: {
     $: (id: string) => HTMLElement;
@@ -33,6 +34,7 @@ export function initStudy(deps: {
     getUserSettings: () => any;
     renderLearnPanel: () => void;
     tutorOnQuizFail: (cat: string, q: string) => void;
+    recordLearning?: (conceptId: string, type: 'lesson' | 'exercise' | 'quiz' | 'chat', successful: boolean) => void;
 }) {
     _$ = deps.$;
     _appendOutput = deps.appendOutput;
@@ -40,13 +42,25 @@ export function initStudy(deps: {
     _getUserSettings = deps.getUserSettings;
     _renderLearnPanel = deps.renderLearnPanel;
     _tutorOnQuizFail = deps.tutorOnQuizFail;
+    if (deps.recordLearning) _recordLearning = deps.recordLearning;
+}
+
+/** Map a quiz question's category to a learning-profile concept id. */
+function conceptIdForQuiz(q: any): string {
+    const raw = (q && (q.concept || q.category)) || 'general';
+    return String(raw).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'general';
 }
 
 // ── Flashcard Persistence ──
 export function loadFlashcards() {
     try {
         const file = nodePath.join(nodeOs.homedir(), '.nexia-ide-flashcards.json');
-        if (nodeFs.existsSync(file)) flashcards = JSON.parse(nodeFs.readFileSync(file, 'utf-8'));
+        if (nodeFs.existsSync(file)) {
+            const parsed = JSON.parse(nodeFs.readFileSync(file, 'utf-8'));
+            // Guard against corrupt/legacy data that isn't an array — keep the
+            // deck a valid array so render/index logic can't crash.
+            flashcards = Array.isArray(parsed) ? parsed : [];
+        }
     } catch {}
 }
 function saveFlashcards() {
@@ -71,13 +85,25 @@ function showNotes() {
 
 // ── Quiz System ──
 export function startQuiz(category?: string, mode?: 'multiple-choice' | 'fill-in') {
-    const allQ = quizzes.getQuizByCategory(category);
+    const allQ = quizzes.getQuizByCategory(category) || [];
     quizMode = mode || 'multiple-choice';
+    let selected: any[];
     if (quizMode === 'fill-in') {
-        quizQuestions = quizzes.shuffleArray(allQ).slice(0, 10);
+        selected = quizzes.shuffleArray(allQ).slice(0, 10);
     } else {
-        quizQuestions = quizzes.shuffleArray(allQ.filter((q: any) => q.options)).slice(0, 10);
+        selected = quizzes.shuffleArray(allQ.filter((q: any) => q.options)).slice(0, 10);
     }
+
+    // Guard: a category with no matching questions would otherwise drop straight
+    // into a "0/0" result. Show a friendly message and stay out of the quiz UI.
+    if (selected.length === 0) {
+        const label = category ? `the "${category}" category` : 'this selection';
+        const modeNote = quizMode === 'fill-in' ? '' : ' (multiple-choice)';
+        alert(`No questions available for ${label}${modeNote}.`);
+        return;
+    }
+
+    quizQuestions = selected;
     quizIndex = 0;
     quizAnswered = false;
     quizScore = { correct: 0, total: 0 };
@@ -122,6 +148,7 @@ function answerQuizMC(idx: number) {
     const q = quizQuestions[quizIndex];
     const correct = idx === q.answerIndex;
     if (correct) quizScore.correct++;
+    _recordLearning(conceptIdForQuiz(q), 'quiz', correct);
 
     const btns = _$('quiz-options').querySelectorAll('.quiz-option');
     btns.forEach((b: any, i: number) => {
@@ -140,6 +167,7 @@ function answerQuizFill() {
     const q = quizQuestions[quizIndex];
     const correct = input.toLowerCase().includes(q.answer.toLowerCase());
     if (correct) quizScore.correct++;
+    _recordLearning(conceptIdForQuiz(q), 'quiz', correct);
     showQuizFeedback(correct, q);
 }
 
@@ -169,7 +197,7 @@ function showQuizResults() {
 
 // ── Flashcard UI ──
 export function showFlashcards() {
-    if (flashcards.length === 0) {
+    if (!Array.isArray(flashcards) || flashcards.length === 0) {
         alert('No flashcards yet! Take a quiz and click "Save as Flashcard" to create some, or add them from the Study panel.');
         return;
     }
@@ -179,8 +207,9 @@ export function showFlashcards() {
 }
 
 function renderFlashcard() {
-    if (flashcards.length === 0) return;
+    if (!Array.isArray(flashcards) || flashcards.length === 0) return;
     const fc = flashcards[fcIndex];
+    if (!fc) return;
     _$('fc-front-text').textContent = fc.front;
     _$('fc-back-text').textContent = fc.back;
     _$('fc-progress').textContent = `${fcIndex + 1} / ${flashcards.length}`;

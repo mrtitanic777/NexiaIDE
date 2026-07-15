@@ -76,6 +76,7 @@ export class DiscordFeed {
     private authUser: DiscordUser | null = null;
     private authServer: http.Server | null = null;
     private authResolve: ((user: DiscordUser | null) => void) | null = null;
+    private authFlowId = 0;
     private static OAUTH_PORT = 18293;
     private static REDIRECT_URI = `http://localhost:${DiscordFeed.OAUTH_PORT}/callback`;
     private guildId: string | null = null;
@@ -153,15 +154,16 @@ export class DiscordFeed {
      * Returns a promise that resolves with the user or null on cancel/error.
      */
     startAuth(): Promise<DiscordUser | null> {
+        // Cancel any in-flight flow first: resolve its orphaned promise and
+        // close its server synchronously, so this new flow can bind the port
+        // and the previous flow's 5-minute timeout can't cancel this one.
+        this.cancelAuth();
+
         return new Promise((resolve) => {
             this.authResolve = resolve;
+            const myFlow = ++this.authFlowId;
 
-            // Kill any existing auth server
-            if (this.authServer) {
-                try { this.authServer.close(); } catch {}
-            }
-
-            this.authServer = http.createServer(async (req, res) => {
+            const server = http.createServer(async (req, res) => {
                 const url = new URL(req.url || '/', `http://localhost:${DiscordFeed.OAUTH_PORT}`);
 
                 if (url.pathname === '/callback') {
@@ -212,11 +214,23 @@ export class DiscordFeed {
                     res.end('Not found');
                 }
             });
+            this.authServer = server;
 
-            this.authServer.listen(DiscordFeed.OAUTH_PORT, '127.0.0.1');
+            // A listen error (e.g. EADDRINUSE from a leftover server or a
+            // double-click) emits 'error' on the server; with no handler Node
+            // throws and crashes the main process. Resolve null instead.
+            server.on('error', () => {
+                try { server.close(); } catch {}
+                if (this.authServer === server) this.authServer = null;
+                if (this.authFlowId === myFlow) this.finishAuth(null);
+            });
 
-            // Auto-timeout after 5 minutes
-            setTimeout(() => this.finishAuth(null), 300_000);
+            server.listen(DiscordFeed.OAUTH_PORT, '127.0.0.1');
+
+            // Auto-timeout after 5 minutes — only cancels THIS flow.
+            setTimeout(() => {
+                if (this.authFlowId === myFlow) this.finishAuth(null);
+            }, 300_000);
         });
     }
 
@@ -226,12 +240,36 @@ export class DiscordFeed {
             this.authResolve = null;
         }
         if (this.authServer) {
+            const server = this.authServer;
+            this.authServer = null;
             // Delay close to let the response finish sending
             setTimeout(() => {
-                try { this.authServer?.close(); } catch {}
-                this.authServer = null;
+                try { server.close(); } catch {}
             }, 1000);
         }
+    }
+
+    /**
+     * Synchronously abort any in-flight OAuth flow: resolve its pending
+     * promise with null and close the callback server immediately.
+     */
+    private cancelAuth() {
+        this.authFlowId++;
+        if (this.authResolve) {
+            this.authResolve(null);
+            this.authResolve = null;
+        }
+        if (this.authServer) {
+            try { this.authServer.close(); } catch {}
+            this.authServer = null;
+        }
+    }
+
+    /**
+     * Release all resources held by this feed. Called on app quit.
+     */
+    cleanup() {
+        this.cancelAuth();
     }
 
     /**
@@ -465,9 +503,37 @@ export class DiscordFeed {
     }
 
     /**
-     * Get the guild ID from the forum channel (cached after first call).
+     * Authoritatively check whether a Discord user is in the Nexia guild.
+     *
+     * This asks the BOT, not the user. The old check read the user's own guild
+     * list, which silently fails when their OAuth token is expired or was granted
+     * before the `guilds` scope existed — making real members look like
+     * non-members. The bot is already in the guild (it serves the forum feed),
+     * so it can answer regardless of the user's scopes.
+     *
+     * Returns true (member), false (definitively not), or null (couldn't tell —
+     * callers must NOT treat this as "not a member").
      */
-    private async getGuildId(): Promise<string | null> {
+    async isUserInGuild(userId: string): Promise<boolean | null> {
+        if (!userId || !this.config?.botToken) return null;
+        try {
+            const guildId = await this.getGuildId();
+            if (!guildId) return null;
+            await this.apiGet(`/guilds/${guildId}/members/${userId}`);
+            return true; // 200 → member
+        } catch (err: any) {
+            const msg = String(err?.message || '');
+            if (msg.includes('404')) return false; // Discord says: not a member
+            return null; // 401/403/429/network — unknown, don't guess
+        }
+    }
+
+    /**
+     * Get the guild ID from the forum channel (cached after first call).
+     * Public so the guild-membership check can match by immutable ID.
+     * Returns null when no bot token is configured (the channel lookup needs it).
+     */
+    async getGuildId(): Promise<string | null> {
         if (this.guildId) return this.guildId;
         try {
             const channel = await this.apiGet(`/channels/${this.config.channelId}`);
