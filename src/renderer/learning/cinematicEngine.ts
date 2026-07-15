@@ -52,6 +52,7 @@ let activeTokenVis: Record<string, (c: CanvasRenderingContext2D, w: number, h: n
 
 interface LayoutRect { x: number; y: number; width: number; height: number; }
 interface BlockLayoutData { spotlight: LayoutRect; panel: LayoutRect; }
+interface ConnLayoutData { srcSpotlight: LayoutRect; dstSpotlight: LayoutRect; }
 interface FullLayoutData {
     blocks: Record<string, BlockLayoutData>;
     tokens: Record<string, { spotlight: LayoutRect; panel: LayoutRect }[]>;
@@ -371,19 +372,20 @@ function expandSpotTo(idx: number) {
     curLine = null; updSpotRange();
 }
 
-function setDualSpot(srcLines: number[], dstLines: number[]) { _dualSpotActive = true; posDualSpot(srcLines, dstLines); }
+function setDualSpot(srcLines: number[], dstLines: number[], baked?: ConnLayoutData | null) { _dualSpotActive = true; posDualSpot(srcLines, dstLines, baked); }
 
-function posDualSpot(srcLines: number[], dstLines: number[]) {
+function posDualSpot(srcLines: number[], dstLines: number[], baked?: ConnLayoutData | null) {
     const pad = 6;
     const srcMin = Math.min(...srcLines), srcMax = Math.max(...srcLines);
     const dstMin = Math.min(...dstLines), dstMax = Math.max(...dstLines);
 
+    // A baked connection layout wins; otherwise fall back to the owning block's
+    // spotlight, which is what the engine did before per-connection layout existed.
     const srcBlockId = getBlockIdForLine(srcMin);
     const dstBlockId = getBlockIdForLine(dstMin);
-    if (!srcBlockId || !activeLayout?.blocks[srcBlockId]?.spotlight) return;
-    if (!dstBlockId || !activeLayout?.blocks[dstBlockId]?.spotlight) return;
-    const srcSpot = activeLayout.blocks[srcBlockId].spotlight;
-    const dstSpot = activeLayout.blocks[dstBlockId].spotlight;
+    const srcSpot = baked?.srcSpotlight || (srcBlockId ? activeLayout?.blocks[srcBlockId]?.spotlight : null);
+    const dstSpot = baked?.dstSpotlight || (dstBlockId ? activeLayout?.blocks[dstBlockId]?.spotlight : null);
+    if (!srcSpot || !dstSpot) return;
 
     const s0 = document.getElementById('ct-l' + srcMin), s1 = document.getElementById('ct-l' + srcMax);
     if (s0 && s1) {
@@ -444,7 +446,16 @@ function getElGroupMidY(els: HTMLElement[]): number {
 
 // ── Show Block Arrow ──
 
-async function showBlockArrow(conn: { src: number[]; dst: number[]; label: string; desc?: string }) {
+async function showBlockArrow(
+    conn: { src: number[]; dst: number[]; label: string; desc?: string },
+    blockId?: string,
+    connIdx?: number,
+) {
+    // Per-connection baked layout from the Lesson Builder, if the author placed one.
+    const bakedConn: ConnLayoutData | null =
+        (blockId !== undefined && connIdx !== undefined
+            ? activeLayout?.connections?.[blockId]?.[connIdx]
+            : null) || null;
     const wrW = rootContainer.querySelector('.ct-ei')!.clientWidth;
     const oldSS = spotStart, oldSE = spotEnd, oldCL = curLine;
     co.querySelectorAll('.ct-hi,.ct-tr').forEach(e => e.classList.remove('ct-hi', 'ct-tr'));
@@ -469,7 +480,7 @@ async function showBlockArrow(conn: { src: number[]; dst: number[]; label: strin
     await sl(T().animations.arrowSourcePause);
 
     dstEls.forEach(el => el.classList.add('ct-hi'));
-    setDualSpot(conn.src, conn.dst);
+    setDualSpot(conn.src, conn.dst, bakedConn);
     await sl(T().animations.arrowDualPause);
 
     ensureArrowDefs();
@@ -506,7 +517,7 @@ async function showBlockArrow(conn: { src: number[]; dst: number[]; label: strin
     let _arrowRafPending = false;
     function onS() {
         if (_arrowRafPending) return; _arrowRafPending = true;
-        requestAnimationFrame(() => { _arrowRafPending = false; posArrow(); posDualSpot(conn.src, conn.dst); });
+        requestAnimationFrame(() => { _arrowRafPending = false; posArrow(); posDualSpot(conn.src, conn.dst, bakedConn); });
     }
     ed.addEventListener('scroll', onS);
     trackDisposable(() => ed.removeEventListener('scroll', onS));
@@ -809,6 +820,12 @@ async function runTokenExplain(blockId: string, blk: LessonBlock) {
         const tok = allTokens[ti];
         const lineEl = document.getElementById('ct-l' + tok.lineIdx); if (!lineEl) continue;
 
+        // Baked token layout from the Lesson Builder, indexed by the same flat
+        // token order this loop walks. Same convention as blocks: x/width (and
+        // panel height) are authored, while y stays runtime so the spotlight
+        // keeps tracking the line as it scrolls.
+        const bakedTok = activeLayout?.tokens?.[blockId]?.[ti];
+
         if (!usrScr) {
             const r = lineEl.getBoundingClientRect(), er = ed.getBoundingClientRect();
             if (r.top < er.top + 40 || r.bottom > er.bottom - 40) {
@@ -838,8 +855,12 @@ async function runTokenExplain(blockId: string, blk: LessonBlock) {
             const pad = 6;
             const top = Math.max(0, lineEl.offsetTop - ed.scrollTop - pad);
             const h = lineEl.offsetHeight + pad * 2;
-            const spotLeft = Math.max(0, tokLeftPx - 8);
-            const spotWidth = tokWidthPx + 16;
+            let spotLeft = Math.max(0, tokLeftPx - 8);
+            let spotWidth = tokWidthPx + 16;
+            if (bakedTok?.spotlight) {
+                spotLeft = bakedTok.spotlight.x + _layoutXOffset;
+                spotWidth = bakedTok.spotlight.width;
+            }
             shEl.setAttribute('x', String(spotLeft));
             shEl.setAttribute('y', String(top)); shEl.setAttribute('width', spotWidth + 'px'); shEl.setAttribute('height', String(h));
             spotEl.style.left = spotLeft + 'px'; spotEl.style.top = top + 'px';
@@ -878,8 +899,10 @@ async function runTokenExplain(blockId: string, blk: LessonBlock) {
         const eiH = eiEl.offsetHeight, eiW = eiEl.offsetWidth;
         const spotRightEdge = parseFloat(spotEl.style.left) + parseFloat(spotEl.style.width) + 40;
         const availMiniW = eiW - spotRightEdge - 20;
-        const miniW = Math.max(240, Math.min(380, availMiniW));
-        miniExpEl.style.width = miniW + 'px'; miniExpEl.style.maxHeight = 'none'; miniExpEl.style.overflowY = 'hidden';
+        const miniW = bakedTok?.panel ? bakedTok.panel.width : Math.max(240, Math.min(380, availMiniW));
+        miniExpEl.style.width = miniW + 'px';
+        miniExpEl.style.maxHeight = bakedTok?.panel ? bakedTok.panel.height + 'px' : 'none';
+        miniExpEl.style.overflowY = bakedTok?.panel ? 'auto' : 'hidden';
         const meDesc = miniExpEl.querySelector('.ct-me-desc') as HTMLElement | null;
         const meTok = miniExpEl.querySelector('.ct-me-tok') as HTMLElement | null;
         if (miniW < 300) {
@@ -889,7 +912,9 @@ async function runTokenExplain(blockId: string, blk: LessonBlock) {
             if (meDesc) { meDesc.style.fontSize = '12px'; meDesc.style.lineHeight = '1.55'; }
             if (meTok) meTok.style.fontSize = '12px'; miniExpEl.style.padding = '14px 16px';
         }
-        let expLeft = Math.min(spotRightEdge, eiW - miniW - 20);
+        let expLeft = bakedTok?.panel
+            ? bakedTok.panel.x + _layoutXOffset
+            : Math.min(spotRightEdge, eiW - miniW - 20);
         let expTop = Math.max(10, Math.min(lineTop - 20, eiH - 280));
         miniExpEl.style.left = expLeft + 'px'; miniExpEl.style.top = expTop + 'px'; miniExpEl.style.right = 'auto';
         miniExpEl.classList.add('ct-v');
@@ -1038,9 +1063,11 @@ async function typeBlock(blk: LessonBlock, myRun: number = runToken) {
     await sl(T().animations.tokenStep);
 
     if (activeConnections[blk.id]) {
-        for (const conn of activeConnections[blk.id]) {
+        const conns = activeConnections[blk.id];
+        for (let ci = 0; ci < conns.length; ci++) {
             if (dead || myRun !== runToken) break;
-            await showBlockArrow(conn);
+            // Pass the block id + index so the arrow can pick up its baked layout.
+            await showBlockArrow(conns[ci], blk.id, ci);
         }
     }
 

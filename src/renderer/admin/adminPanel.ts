@@ -1131,11 +1131,82 @@ function renderCodeEditor(container: HTMLElement) {
 
 // ── Overlay Rectangles (draggable spotlights and panels) ──
 
+/**
+ * Flatten a block's token-lines into the same order the cinematic engine walks
+ * them. The engine indexes layout.tokens[blockId] by this flat position, so the
+ * two must agree or the wrong rectangle lights up.
+ */
+function flatTokens(blockId: string): { line: number; text: string }[] {
+    const out: { line: number; text: string }[] = [];
+    for (const tl of (_builder?.lesson.tokens?.[blockId] || [])) {
+        for (const t of (tl.tokens || [])) out.push({ line: tl.line, text: t.text });
+    }
+    return out;
+}
+
+/**
+ * Create default token/connection layouts for anything that has content but no
+ * placement yet, and drop entries whose token/connection was deleted. Without
+ * this, layout.tokens/.connections stay empty forever and the engine has nothing
+ * to read.
+ */
+function ensureAuxLayouts(blockId: string) {
+    if (!_builder) return;
+    const bl = _builder.layout.blocks[blockId];
+    const baseX = bl?.spotlight.x ?? 50;
+    const baseY = bl?.spotlight.y ?? 10;
+    const panelX = bl?.panel.x ?? 520;
+
+    const toks = flatTokens(blockId);
+    if (toks.length) {
+        const arr = _builder.layout.tokens[blockId] || [];
+        for (let i = arr.length; i < toks.length; i++) {
+            arr[i] = {
+                spotlight: { x: baseX + 8, y: baseY + i * 26, width: 150, height: 22 },
+                panel: { x: panelX, y: baseY + i * 26, width: 300, height: 160 },
+            };
+        }
+        arr.length = toks.length;
+        _builder.layout.tokens[blockId] = arr;
+    } else {
+        delete _builder.layout.tokens[blockId];
+    }
+
+    const conns = _builder.lesson.connections?.[blockId] || [];
+    if (conns.length) {
+        const arr = _builder.layout.connections[blockId] || [];
+        for (let i = arr.length; i < conns.length; i++) {
+            arr[i] = {
+                srcSpotlight: { x: baseX, y: baseY + i * 50, width: bl?.spotlight.width ?? 400, height: 22 },
+                dstSpotlight: { x: baseX, y: baseY + i * 50 + 26, width: bl?.spotlight.width ?? 400, height: 22 },
+            };
+        }
+        arr.length = conns.length;
+        _builder.layout.connections[blockId] = arr;
+    } else {
+        delete _builder.layout.connections[blockId];
+    }
+}
+
 function renderOverlayRects(overlay: HTMLElement) {
     if (!_builder) return;
 
     const selectedId = _builder.selectedBlockId;
     if (!selectedId) return;
+
+    // Blocks added after the lesson was loaded have no layout yet — initBuilder
+    // only seeds the blocks it saw at load time. Without this, a freshly added
+    // block renders no rectangles at all and looks broken.
+    if (!_builder.layout.blocks[selectedId]) {
+        const blk = (_builder.lesson.blocks || []).find((b: any) => b.id === selectedId);
+        const lineCount = blk?.lines?.length || 1;
+        _builder.layout.blocks[selectedId] = {
+            spotlight: { x: 50, y: 10, width: 400, height: lineCount * _builder.lineHeight + 12 },
+            panel: { x: 520, y: 10, width: 340, height: 260 },
+        };
+    }
+
+    ensureAuxLayouts(selectedId);
 
     const blockLayout = _builder.layout.blocks[selectedId];
     if (!blockLayout) return;
@@ -1163,6 +1234,24 @@ function renderOverlayRects(overlay: HTMLElement) {
         'lb-panel-rect', '📝 Explanation'
     );
     overlay.appendChild(panelRect);
+
+    // Token spotlight + mini-panel for the selected token. Only the selected one
+    // is drawn — a block with 20 tokens would otherwise bury the preview.
+    const toks = flatTokens(selectedId);
+    const ti = _builder.selectedTokenIdx;
+    if (ti >= 0 && ti < toks.length) {
+        const tl = _builder.layout.tokens[selectedId]?.[ti];
+        if (tl) {
+            overlay.appendChild(createDraggableRect(
+                tl.spotlight, `tok-spot-${ti}`, selectedId,
+                'lb-tok-rect', `🔍 "${toks[ti].text}"`
+            ));
+            overlay.appendChild(createDraggableRect(
+                tl.panel, `tok-panel-${ti}`, selectedId,
+                'lb-tok-panel-rect', `💬 "${toks[ti].text}" panel`
+            ));
+        }
+    }
 
     // Connection spotlights (if any)
     const conns = _builder.lesson.connections?.[selectedId] || [];
@@ -1414,7 +1503,9 @@ function renderProperties(container: HTMLElement) {
     const tokSection = document.createElement('div');
     tokSection.className = 'lb-props-section';
     let tokHtml = '<div class="lb-section-title">🔍 TOKEN EXPLANATIONS <button class="lb-add-block-btn" id="lb-add-token">＋</button></div>';
+    tokHtml += '<div style="font-size:10px;color:var(--text-muted);margin:-4px 0 6px">“Place” drags this token’s spotlight and panel on the preview. Unplaced tokens fall back to auto-positioning.</div>';
     tokHtml += '<div id="lb-token-list">';
+    let _flat = 0;
     blockTokens.forEach((tl: any, ti: number) => {
         const lineTokens = tl.tokens || [];
         tokHtml += `<div class="lb-token-line" style="margin-bottom:8px;padding:6px;background:rgba(255,255,255,0.02);border-radius:4px;border:1px solid var(--border)">`;
@@ -1423,8 +1514,13 @@ function renderProperties(container: HTMLElement) {
             tokHtml += `<div style="margin:4px 0;padding:4px;background:rgba(86,212,245,0.04);border-radius:3px">`;
             tokHtml += `<input class="lb-field-input" style="margin-bottom:2px;font-family:monospace;font-size:10px" placeholder="token text" value="${escHtml(tok.text)}" data-tli="${ti}" data-tki="${tki}" data-field="text">`;
             tokHtml += `<textarea class="lb-field-input lb-field-textarea" rows="2" style="font-size:10px" placeholder="explanation" data-tli="${ti}" data-tki="${tki}" data-field="desc">${escHtml(tok.desc || tok.description || '')}</textarea>`;
-            tokHtml += `<button class="lb-add-block-btn" data-remove-tok="${ti}:${tki}" style="font-size:9px;color:#f44747;border-color:#f44747">Remove token</button>`;
+            const isPlaced = _builder!.selectedTokenIdx === _flat;
+            tokHtml += `<div style="display:flex;gap:4px;align-items:center">
+                <button class="lb-add-block-btn" data-place-tok="${_flat}" style="font-size:9px;${isPlaced ? 'color:var(--green);border-color:var(--green)' : ''}">${isPlaced ? '◉ Placing' : '◎ Place'}</button>
+                <button class="lb-add-block-btn" data-remove-tok="${ti}:${tki}" style="font-size:9px;color:#f44747;border-color:#f44747">Remove token</button>
+            </div>`;
             tokHtml += '</div>';
+            _flat++;
         });
         tokHtml += `<button class="lb-add-block-btn" data-add-tok="${ti}" style="margin-top:2px">＋ Add Token</button>`;
         tokHtml += '</div>';
@@ -1452,6 +1548,14 @@ function renderProperties(container: HTMLElement) {
         const btn = (e.target as HTMLElement).closest('button') as HTMLElement;
         if (!btn || !_builder) return;
         _builder.lesson.tokens = _builder.lesson.tokens || {};
+        if (btn.dataset.placeTok !== undefined) {
+            const idx = parseInt(btn.dataset.placeTok, 10);
+            // Toggle: clicking the active one clears the selection.
+            _builder.selectedTokenIdx = _builder.selectedTokenIdx === idx ? -1 : idx;
+            const ws = document.getElementById('lb-workspace');
+            if (ws) renderBuilderWorkspace(ws);
+            return;
+        }
         if (btn.id === 'lb-add-token') {
             const tlines = _builder.lesson.tokens[blockId] || [];
             tlines.push({ line: 0, tokens: [{ text: '', desc: '' }] });

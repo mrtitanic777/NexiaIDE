@@ -57,6 +57,10 @@ installer/*.obj
 # rather than documentation, and it goes stale fast.
 notes.md
 
+# Design spec for the private auth/lesson server. The server isn't published and
+# isn't meant to be reimplemented, so this is internal design context, not docs.
+API_CONTRACT.md
+
 # ══════════════════════════════════════
 #  LOCAL / EDITOR CRUFT
 # ══════════════════════════════════════

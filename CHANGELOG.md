@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.2.1
+
+### Fixed
+- **Discord community works for everyone.** Signed-in users now receive the bot configuration from the Nexia server, so the forum feed and membership check work on every machine — not just one that had been configured by hand. Previously the server returned empty credentials, leaving everyone else with an empty Community panel.
+- **Lesson Builder: blocks added after loading a lesson couldn't be positioned.** A newly added block had no layout entry, so the preview drew no rectangles at all — not even its spotlight — and the coordinate editors never appeared.
+
+### Added
+- **Token-level layout in the Lesson Builder.** Each token explanation can have its spotlight and mini-panel placed by hand via `◎ Place`, and the cinematic engine honours those baked positions at playback. Tokens without a placement keep auto-positioning.
+- **Connection-level layout.** A connection's source and destination spotlights can be placed independently of the block spotlight they'd otherwise inherit.
+
+As with block layout, the authored **x, width and panel height** are used while the **vertical position stays live**, so spotlights keep tracking their code line as it scrolls.
+
 ## v2.2.0
 
 ### Interoperability

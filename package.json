@@ -2,7 +2,7 @@
   "name": "nexia-ide",
   "displayName": "Nexia IDE",
   "description": "Xbox 360 Development Environment & Adaptive C++ Tutor",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "author": "Nexia",
   "license": "MIT",
   "main": "dist/main/main.js",

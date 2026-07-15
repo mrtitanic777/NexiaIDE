@@ -3432,6 +3432,10 @@ body:not(.fancy) .toggle-slider, body:not(.fancy) .toggle-slider::before {
 .lb-spot-rect { border:2px solid rgba(78,201,176,0.7); background:rgba(78,201,176,0.08); }
 .lb-panel-rect { border:2px dashed rgba(229,192,123,0.7); background:rgba(229,192,123,0.06); }
 .lb-conn-rect { border:2px dotted rgba(86,156,214,0.6); background:rgba(86,156,214,0.05); }
+/* Token-level layout — cyan, to read as distinct from the block spotlight (teal)
+   and the block panel (gold) sitting alongside it on the same canvas. */
+.lb-tok-rect { border:2px solid rgba(86,212,245,0.8); background:rgba(86,212,245,0.10); }
+.lb-tok-panel-rect { border:2px dashed rgba(86,212,245,0.55); background:rgba(86,212,245,0.05); }
 .lb-drag-label { position:absolute; top:-18px; left:4px; font-size:9px; font-weight:600; color:rgba(255,255,255,0.7); white-space:nowrap; pointer-events:none; text-shadow:0 1px 3px rgba(0,0,0,0.8); }
 .lb-resize-handle { position:absolute; width:12px; height:12px; cursor:nwse-resize; pointer-events:all; }
 .lb-resize-br { bottom:-3px; right:-3px; border-right:2px solid rgba(255,255,255,0.5); border-bottom:2px solid rgba(255,255,255,0.5); border-radius:0 0 3px 0; }
