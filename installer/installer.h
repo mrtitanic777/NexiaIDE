@@ -90,7 +90,22 @@
 #define NXI_UNINSTALLER_EXE     L"uninstall.exe"
 #define NXI_REGISTRY_KEY        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\NexiaIDE"
 
-#define NXI_DEFAULT_INSTALL_DIR L"C:\\Program Files\\NexiaIDE"
+/* The default install directory is resolved at runtime by
+ * NxIns_GetDefaultInstallDir() -- it is %LOCALAPPDATA%\Programs\NexiaIDE, which
+ * is per-user and writable without elevation, so updates need no UAC prompt.
+ * It cannot be a literal: LOCALAPPDATA differs per user and per machine.
+ *
+ * This used to be L"C:\\Program Files\\NexiaIDE". Program Files is only
+ * writable by an administrator, which is what forced every update through UAC.
+ *
+ * Old installs still live in Program Files and are migrated on upgrade, so
+ * both locations must stay detectable. */
+#define NXI_PERUSER_SUBDIR      L"Programs\\NexiaIDE"
+#define NXI_LEGACY_INSTALL_DIR  L"C:\\Program Files\\NexiaIDE"
+
+/* Fills out with %LOCALAPPDATA%\Programs\NexiaIDE. Returns FALSE if
+ * LOCALAPPDATA cannot be resolved. */
+BOOL NxIns_GetDefaultInstallDir(WCHAR *out, int maxLen);
 
 #define NXI_PAYLOAD_MAGIC       0x4E58494E  /* 'NXIN' */
 #define NXI_PAYLOAD_VERSION     2
@@ -244,6 +259,16 @@ typedef struct {
     BOOL            installing;
     BOOL            installSuccess;
     volatile BOOL   installCancelled;   /* written by UI thread, read by worker in tight loops */
+
+    /* ── Silent / update mode (/S) ──
+     * Set when the IDE's updater launches setup. Shows only a progress window,
+     * never a prompt: the interactive "already installed" dialog offers
+     * Yes = Uninstall, which during an update removed the IDE and exited,
+     * leaving the user with nothing installed. An update must never be able to
+     * uninstall the application. */
+    BOOL            silent;
+    BOOL            migrateLegacy;      /* an old Program Files install to retire after we succeed */
+    WCHAR           legacyDir[NXI_MAX_PATH];
     volatile int    filesExtracted;     /* written by worker, read by UI */
     volatile int    filesToExtract;     /* written by worker, read by UI */
     WCHAR           statusText[512];

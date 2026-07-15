@@ -1342,15 +1342,20 @@ BOOL NxIns_RegisterUninstaller(void)
     WCHAR iconPath[NXI_MAX_PATH];
     wsprintfW(iconPath, L"%s\\%s", g_ins.installDir, NXI_APP_EXE);
 
+    /* HKCU, always.
+     *
+     * The install is per-user (%LOCALAPPDATA%\Programs\NexiaIDE), so its
+     * Add/Remove Programs entry belongs to this user only. Writing to HKLM
+     * would advertise a machine-wide program whose files live in one user's
+     * private directory -- every other user would see an entry they cannot run
+     * or uninstall.
+     *
+     * This previously tried HKLM first and fell back to HKCU "if no admin
+     * rights", which made the hive depend on how setup happened to be launched.
+     * HKCU also needs no elevation, which is the point. */
     HKEY hKey;
-    LONG result = RegCreateKeyExW(HKEY_LOCAL_MACHINE, NXI_REGISTRY_KEY,
+    LONG result = RegCreateKeyExW(HKEY_CURRENT_USER, NXI_REGISTRY_KEY,
                                   0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL);
-
-    /* Fall back to HKCU if no admin rights */
-    if (result != ERROR_SUCCESS) {
-        result = RegCreateKeyExW(HKEY_CURRENT_USER, NXI_REGISTRY_KEY,
-                                 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL);
-    }
 
     if (result != ERROR_SUCCESS) return FALSE;
 
@@ -1380,13 +1385,57 @@ BOOL NxIns_WriteUninstaller(void)
     NxIns_SetStatus(L"Writing uninstaller...");
 
     /*
-     * Copy this EXE as uninstall.exe into the install directory.
-     * When run with /uninstall flag it will remove files.
+     * Write this EXE as uninstall.exe into the install directory, but copy ONLY
+     * the PE image -- not the payload appended after it.
+     *
+     * Layout is [PE][PayloadHeader][FileEntries][FileData][Trailer], and
+     * payloadOffset is where the PE ends, so the first payloadOffset bytes are a
+     * complete, valid executable on their own.
+     *
+     * The uninstaller only ever runs with /uninstall, which returns from WinMain
+     * before NxIns_Init (and therefore NxIns_FindPayload) is reached -- it never
+     * reads the payload. Copying the whole EXE made every install carry a second
+     * full copy of the ~150 MB payload, about 40% of the installed size, purely
+     * to be deleted later. This drops uninstall.exe from ~158 MB to ~1 MB.
      */
     WCHAR uninstDst[NXI_MAX_PATH];
     wsprintfW(uninstDst, L"%s\\%s", g_ins.installDir, NXI_UNINSTALLER_EXE);
 
-    return CopyFileW(g_ins.selfPath, uninstDst, FALSE);
+    /* No payload located (e.g. an unpacked dev build): fall back to a plain copy
+     * rather than truncating to a length we have not verified. */
+    if (!g_ins.payloadFound || g_ins.payloadOffset == 0)
+        return CopyFileW(g_ins.selfPath, uninstDst, FALSE);
+
+    HANDLE hIn = CreateFileW(g_ins.selfPath, GENERIC_READ, FILE_SHARE_READ,
+                             NULL, OPEN_EXISTING, 0, NULL);
+    if (hIn == INVALID_HANDLE_VALUE) return FALSE;
+
+    HANDLE hOut = CreateFileW(uninstDst, GENERIC_WRITE, 0, NULL,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hOut == INVALID_HANDLE_VALUE) { CloseHandle(hIn); return FALSE; }
+
+    const DWORD chunkMax = 64 * 1024;
+    BYTE *buf = (BYTE *)malloc(chunkMax);
+    if (!buf) { CloseHandle(hIn); CloseHandle(hOut); return FALSE; }
+
+    BOOL ok = TRUE;
+    DWORD remaining = g_ins.payloadOffset;
+    while (remaining > 0) {
+        DWORD want = (remaining < chunkMax) ? remaining : chunkMax;
+        DWORD got = 0, put = 0;
+        if (!ReadFile(hIn, buf, want, &got, NULL) || got == 0) { ok = FALSE; break; }
+        if (!WriteFile(hOut, buf, got, &put, NULL) || put != got) { ok = FALSE; break; }
+        remaining -= got;
+    }
+
+    free(buf);
+    CloseHandle(hIn);
+    CloseHandle(hOut);
+
+    /* A half-written uninstaller is worse than none: it would sit in Add/Remove
+     * Programs and fail when run. */
+    if (!ok) { DeleteFileW(uninstDst); return FALSE; }
+    return TRUE;
 }
 
 
@@ -2119,12 +2168,60 @@ copy_dlls:
  *  Install Thread
  * ═══════════════════════════════════════════════════════════════ */
 
+/* Wait until <installDir>\NexiaIDE.exe is no longer locked by a running copy.
+ *
+ * Only matters for silent updates: the IDE launches setup and then quits, so
+ * for a moment it is still running and holding its own files open. The wizard
+ * never hit this because a human takes seconds to click through, by which time
+ * the app has exited -- but silent mode starts extracting immediately and would
+ * be overwriting files that are still in use.
+ *
+ * Probing for a write handle is used rather than looking for the process by
+ * name: it tests the thing we actually need (can we replace this file?) and
+ * does not care how the app was started or how many copies exist.
+ *
+ * Returns TRUE if the path is writable (or absent, i.e. a fresh install). */
+static BOOL sWaitForAppToClose(DWORD timeoutMs)
+{
+    WCHAR exePath[NXI_MAX_PATH];
+    wsprintfW(exePath, L"%s\\%s", g_ins.installDir, NXI_APP_EXE);
+
+    if (GetFileAttributesW(exePath) == INVALID_FILE_ATTRIBUTES)
+        return TRUE;   /* nothing installed here yet */
+
+    DWORD waited = 0;
+    for (;;) {
+        HANDLE h = CreateFileW(exePath, GENERIC_WRITE, 0 /* no sharing */,
+                               NULL, OPEN_EXISTING, 0, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            CloseHandle(h);
+            return TRUE;
+        }
+        if (GetLastError() != ERROR_SHARING_VIOLATION)
+            return TRUE;   /* locked for some other reason; let extraction report it */
+
+        if (waited >= timeoutMs) return FALSE;
+        if (g_ins.installCancelled) return FALSE;
+        Sleep(250);
+        waited += 250;
+    }
+}
+
 DWORD WINAPI NxIns_InstallThread(LPVOID param)
 {
     (void)param;
 
     g_ins.installing = TRUE;
     g_ins.installSuccess = FALSE;
+
+    /* Step 0: for a silent update, let the running IDE finish exiting first. */
+    if (g_ins.silent) {
+        NxIns_SetStatus(L"Waiting for Nexia IDE to close...");
+        if (!sWaitForAppToClose(60000)) {
+            NxIns_SetStatus(L"Nexia IDE is still running \x2014 update cancelled.");
+            goto done;
+        }
+    }
 
     /* Step 1: Extract payload files */
     NxIns_SetStatus(L"Extracting files...");
@@ -2705,6 +2802,10 @@ static void sHandleClick(HWND hwnd, int mx, int my)
  *  Window Procedure
  * ═══════════════════════════════════════════════════════════════ */
 
+/* Defined below, next to WinMain; the window procedure calls it when an
+ * install completes. */
+static void sRetireLegacyInstall(void);
+
 static LRESULT CALLBACK sInstallerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
@@ -2782,7 +2883,28 @@ static LRESULT CALLBACK sInstallerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LP
         return 0;
 
     case WM_APP + 101:
-        /* Installation complete — switch to final page */
+        /* Installation finished (successfully or not). */
+        if (g_ins.installSuccess)
+            sRetireLegacyInstall();
+
+        if (g_ins.silent) {
+            /* Unattended: no "Finish" page to click. Relaunch the IDE and exit.
+             * A failure must still be visible -- silently vanishing after an
+             * update would leave the user wondering whether it worked. */
+            if (g_ins.installSuccess) {
+                WCHAR exePath[NXI_MAX_PATH];
+                wsprintfW(exePath, L"%s\\%s", g_ins.installDir, NXI_APP_EXE);
+                ShellExecuteW(NULL, L"open", exePath, NULL, g_ins.installDir, SW_SHOWNORMAL);
+            } else {
+                MessageBoxW(NULL,
+                    L"The update could not be installed.\n\n"
+                    L"Your existing installation has not been changed.",
+                    L"Nexia IDE Setup", MB_OK | MB_ICONERROR);
+            }
+            PostQuitMessage(0);
+            return 0;
+        }
+
         NxIns_SetPage(NXI_PAGE_COMPLETE);
         return 0;
 
@@ -2880,6 +3002,30 @@ BOOL NxIns_CreateWindow(int nCmdShow)
  *  Lifecycle
  * ═══════════════════════════════════════════════════════════════ */
 
+/* Resolve %LOCALAPPDATA%\Programs\NexiaIDE.
+ *
+ * Per-user, so the installer, the uninstaller and the updater can all write
+ * here without elevation -- that is the entire reason updates no longer need a
+ * UAC prompt. CSIDL_LOCAL_APPDATA is used (not the KNOWNFOLDERID API) because
+ * it is available back to Windows 7, which this installer still supports. */
+BOOL NxIns_GetDefaultInstallDir(WCHAR *out, int maxLen)
+{
+    WCHAR localAppData[NXI_MAX_PATH];
+
+    if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, localAppData) != S_OK)
+        return FALSE;
+    if (localAppData[0] == L'\0')
+        return FALSE;
+
+    /* Guard the concatenation: a truncated install path would be catastrophic,
+     * since it is later used as the root of a recursive delete on uninstall. */
+    if ((int)(wcslen(localAppData) + wcslen(L"\\") + wcslen(NXI_PERUSER_SUBDIR)) >= maxLen)
+        return FALSE;
+
+    wsprintfW(out, L"%s\\%s", localAppData, NXI_PERUSER_SUBDIR);
+    return TRUE;
+}
+
 BOOL NxIns_Init(HINSTANCE hInstance)
 {
     ZeroMemory(&g_ins, sizeof(g_ins));
@@ -2889,7 +3035,16 @@ BOOL NxIns_Init(HINSTANCE hInstance)
     g_ins.components = NXI_COMP_DEFAULT;
     g_ins.launchAfter = TRUE;
     g_ins.createDesktopShortcut = TRUE;
-    wcsncpy(g_ins.installDir, NXI_DEFAULT_INSTALL_DIR, NXI_MAX_PATH - 1);
+    if (!NxIns_GetDefaultInstallDir(g_ins.installDir, NXI_MAX_PATH)) {
+        /* LOCALAPPDATA is unavailable on a sane Windows install, but never fall
+         * back to Program Files: that silently reintroduces the UAC dependency
+         * this is meant to remove. Fail loudly instead. */
+        MessageBoxW(NULL,
+            L"Setup could not determine your local application data folder.\n\n"
+            L"Nexia IDE installs into %LOCALAPPDATA%\\Programs\\NexiaIDE.",
+            L"Nexia IDE Setup", MB_OK | MB_ICONERROR);
+        return FALSE;
+    }
 
     /* Get our own EXE path */
     GetModuleFileNameW(NULL, g_ins.selfPath, NXI_MAX_PATH);
@@ -2990,6 +3145,91 @@ static BOOL sIsAlreadyInstalled(WCHAR *outInstallDir, int maxLen)
 }
 
 
+/* ═══════════════════════════════════════════════════════════════
+ *  Legacy (Program Files) install retirement
+ *
+ *  Nexia IDE used to install into C:\Program Files\NexiaIDE with an HKLM
+ *  uninstall entry. Both need administrator rights to remove, but the new
+ *  per-user install runs asInvoker -- so retirement is done by relaunching
+ *  ourselves elevated with /RETIRE=<dir>.
+ *
+ *  This costs exactly one UAC prompt, once, on the upgrade that migrates a
+ *  machine. Every update after that is elevation-free.
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* Runs in the elevated instance. Deletes the old install and its HKLM key. */
+static void sRetireLegacyNow(const WCHAR *dir)
+{
+    /* Refuse obviously wrong targets: this is a recursive delete running with
+     * administrator rights, so a malformed path would be destructive. Require
+     * an absolute path that still looks like a NexiaIDE install. */
+    if (!dir || !dir[0]) return;
+    if (wcslen(dir) < 4) return;
+    if (dir[1] != L':' || dir[2] != L'\\') return;
+    if (!wcsstr(dir, L"NexiaIDE")) return;
+    if (GetFileAttributesW(dir) == INVALID_FILE_ATTRIBUTES) return;
+
+    sDeleteDirectoryContents(dir);
+
+    /* sDeleteDirectoryContents skips uninstall.exe by name: its usual caller IS
+     * the uninstaller, which cannot delete itself while it is running. Here we
+     * are setup.exe retiring a different install, so that file is not in use --
+     * and if it is left behind the directory is never empty and RemoveDirectoryW
+     * fails, stranding a 158 MB file in Program Files forever. */
+    WCHAR uninst[NXI_MAX_PATH];
+    wsprintfW(uninst, L"%s\\%s", dir, NXI_UNINSTALLER_EXE);
+    SetFileAttributesW(uninst, FILE_ATTRIBUTE_NORMAL);
+    DeleteFileW(uninst);
+
+    RemoveDirectoryW(dir);
+
+    /* Remove the machine-wide Add/Remove Programs entry so the retired install
+     * does not linger there pointing at a directory that no longer exists. */
+    SHDeleteKeyW(HKEY_LOCAL_MACHINE, NXI_REGISTRY_KEY);
+}
+
+/* Runs in the normal (unelevated) instance, after a successful per-user
+ * install. Returns immediately if there is nothing to retire. */
+static void sRetireLegacyInstall(void)
+{
+    if (!g_ins.migrateLegacy || !g_ins.legacyDir[0]) return;
+
+    /* Never retire the directory we just installed into. */
+    if (_wcsicmp(g_ins.legacyDir, g_ins.installDir) == 0) return;
+
+    /* Only retire once the new install is actually usable -- losing the old
+     * copy without a working replacement would leave the user with nothing,
+     * which is exactly the failure this whole change exists to prevent. */
+    WCHAR newExe[NXI_MAX_PATH];
+    wsprintfW(newExe, L"%s\\%s", g_ins.installDir, NXI_APP_EXE);
+    if (GetFileAttributesW(newExe) == INVALID_FILE_ATTRIBUTES) return;
+
+    /* Quote the path: the default install dir is "C:\Program Files\NexiaIDE",
+     * and CommandLineToArgvW splits on spaces. Unquoted, the elevated instance
+     * received /RETIRE=C:\Program and would have recursively deleted C:\Program
+     * had the NexiaIDE substring guard in sRetireLegacyNow not rejected it.
+     * CommandLineToArgvW strips the quotes back off on the other side. */
+    WCHAR params[NXI_MAX_PATH + 16];
+    wsprintfW(params, L"/RETIRE=\"%s\"", g_ins.legacyDir);
+
+    SHELLEXECUTEINFOW sei;
+    ZeroMemory(&sei, sizeof(sei));
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"runas";          /* raises the UAC prompt */
+    sei.lpFile = g_ins.selfPath;
+    sei.lpParameters = params;
+    sei.nShow = SW_HIDE;
+
+    /* If the user declines the prompt, the old copy simply stays on disk. That
+     * is untidy but harmless: the new install already works, and the old entry
+     * can still be removed from Add/Remove Programs by hand. */
+    if (ShellExecuteExW(&sei) && sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, 60000);
+        CloseHandle(sei.hProcess);
+    }
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLineA, int nCmdShow)
 {
@@ -3055,11 +3295,52 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         }
     }
 
-    /* Get wide command line (works on all Windows versions) */
-    LPWSTR lpCmdLine = GetCommandLineW();
+    /* ── Parse the command line ──
+     *
+     * Tokenised with CommandLineToArgvW rather than wcsstr'd. The /uninstall
+     * check used to substring-match the whole command line, which includes the
+     * EXE path -- any user whose path happened to contain "/uninstall" or
+     * "-uninstall" would have setup silently uninstall instead of install.
+     *
+     *   /S, /silent    unattended: no prompts, no wizard (used by the updater)
+     *   /D=<dir>       override the install directory
+     *   /uninstall     remove the installation
+     */
+    BOOL wantUninstall = FALSE;
+    BOOL silent = FALSE;
+    WCHAR overrideDir[NXI_MAX_PATH] = {0};
+    WCHAR retireDir[NXI_MAX_PATH] = {0};
+    {
+        int argc = 0;
+        LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv) {
+            for (int i = 1; i < argc; i++) {
+                if (_wcsicmp(argv[i], L"/uninstall") == 0 || _wcsicmp(argv[i], L"-uninstall") == 0) {
+                    wantUninstall = TRUE;
+                } else if (_wcsicmp(argv[i], L"/S") == 0 || _wcsicmp(argv[i], L"/silent") == 0) {
+                    silent = TRUE;
+                } else if (_wcsnicmp(argv[i], L"/D=", 3) == 0) {
+                    wcsncpy(overrideDir, argv[i] + 3, NXI_MAX_PATH - 1);
+                    overrideDir[NXI_MAX_PATH - 1] = L'\0';
+                } else if (_wcsnicmp(argv[i], L"/RETIRE=", 8) == 0) {
+                    wcsncpy(retireDir, argv[i] + 8, NXI_MAX_PATH - 1);
+                    retireDir[NXI_MAX_PATH - 1] = L'\0';
+                }
+            }
+            LocalFree(argv);
+        }
+    }
 
-    /* Check for /uninstall flag */
-    if (lpCmdLine && (wcsstr(lpCmdLine, L"/uninstall") || wcsstr(lpCmdLine, L"-uninstall"))) {
+    /* ── /RETIRE=<dir> ──
+     * Internal: an elevated copy of ourselves, launched by sRetireLegacyInstall
+     * once a per-user install has succeeded, to delete an old Program Files
+     * install and its HKLM entry. Runs before NxIns_Init: it needs no UI. */
+    if (retireDir[0]) {
+        sRetireLegacyNow(retireDir);
+        return 0;
+    }
+
+    if (wantUninstall) {
         CoInitialize(NULL);
         NxIns_Uninstall(FALSE);
         CoUninitialize();
@@ -3067,40 +3348,99 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
 
     if (!NxIns_Init(hInstance)) return 1;
+    g_ins.silent = silent;
 
-    /* Check if already installed (registry + filesystem verified).
-     * If so, offer Uninstall / Reinstall / Cancel before the wizard. */
+    /* ── Decide where to install ──
+     *
+     * NxIns_Init has already defaulted installDir to %LOCALAPPDATA%\Programs\NexiaIDE.
+     *
+     * If a previous install exists we upgrade it in place -- EXCEPT when it is a
+     * legacy Program Files install. Those were written by an installer that
+     * required administrator; this one runs asInvoker and cannot write there, so
+     * reusing that path would fail every time. Instead we install per-user and
+     * retire the old copy afterwards.
+     */
     {
         WCHAR existingDir[NXI_MAX_PATH] = {0};
-        if (sIsAlreadyInstalled(existingDir, NXI_MAX_PATH)) {
-            WCHAR msg[NXI_MAX_PATH + 256];
+        BOOL haveExisting = sIsAlreadyInstalled(existingDir, NXI_MAX_PATH);
+        BOOL legacy = FALSE;
+
+        if (haveExisting) {
+            WCHAR defaultDir[NXI_MAX_PATH] = {0};
+            NxIns_GetDefaultInstallDir(defaultDir, NXI_MAX_PATH);
+
+            /* Anything that is not the per-user location is treated as legacy.
+             * Compare case-insensitively: Windows paths are not case sensitive. */
+            legacy = (_wcsicmp(existingDir, defaultDir) != 0);
+
+            if (legacy) {
+                g_ins.migrateLegacy = TRUE;
+                wcsncpy(g_ins.legacyDir, existingDir, NXI_MAX_PATH - 1);
+                g_ins.legacyDir[NXI_MAX_PATH - 1] = L'\0';
+                /* keep the per-user default in installDir */
+            } else {
+                wcsncpy(g_ins.installDir, existingDir, NXI_MAX_PATH - 1);
+                g_ins.installDir[NXI_MAX_PATH - 1] = L'\0';
+            }
+        }
+
+        /* An explicit /D= always wins. */
+        if (overrideDir[0]) {
+            wcsncpy(g_ins.installDir, overrideDir, NXI_MAX_PATH - 1);
+            g_ins.installDir[NXI_MAX_PATH - 1] = L'\0';
+            g_ins.migrateLegacy = FALSE;
+        }
+
+        /* ── Interactive-only: offer a choice when already installed ──
+         *
+         * Never in silent mode. This dialog previously ran during updates too,
+         * and its "Yes" meant uninstall-and-exit -- the natural reading is
+         * "yes, replace the old files", so choosing it removed the IDE and quit
+         * with nothing installed. Silent updates now skip it entirely, and the
+         * wording below no longer invites that reading.
+         */
+        if (haveExisting && !silent && !overrideDir[0]) {
+            WCHAR msg[NXI_MAX_PATH * 2 + 512];
             wsprintfW(msg,
                 L"Nexia IDE is already installed at:\n\n"
                 L"%s\n\n"
                 L"What would you like to do?\n\n"
-                L"  Yes  =  Uninstall (remove Nexia IDE)\n"
-                L"  No   =  Reinstall (overwrite current installation)\n"
-                L"  Cancel  =  Exit",
+                L"  Yes  =  Update it (keep Nexia IDE, replace program files)\n"
+                L"  No   =  Remove it completely (uninstall)\n"
+                L"  Cancel  =  Exit without changing anything",
                 existingDir);
 
             int result = MessageBoxW(NULL, msg, L"Nexia IDE Setup",
                                      MB_YESNOCANCEL | MB_ICONQUESTION);
 
-            if (result == IDYES) {
-                /* Uninstall */
+            if (result == IDCANCEL) return 0;
+
+            if (result == IDNO) {
                 CoInitialize(NULL);
                 NxIns_Uninstall(TRUE);
                 CoUninitialize();
                 return 0;
-            } else if (result == IDCANCEL) {
-                return 0;
             }
-            /* IDNO = reinstall — pre-fill path and continue to wizard */
-            wcsncpy(g_ins.installDir, existingDir, NXI_MAX_PATH - 1);
+            /* IDYES = update — fall through to the wizard */
         }
     }
 
     if (!NxIns_CreateWindow(nCmdShow)) return 1;
+
+    /* Silent mode: no wizard. Show the progress page and start installing
+     * immediately -- same NxIns_InstallThread the wizard uses, so extraction,
+     * shortcuts, file associations and uninstaller registration all behave
+     * identically. The window stays visible so an update is not a black box;
+     * it just needs no clicks. */
+    if (g_ins.silent) {
+        NxIns_SetPage(NXI_PAGE_INSTALLING);
+        g_ins.hInstallThread = CreateThread(NULL, 0, NxIns_InstallThread, NULL, 0, NULL);
+        if (!g_ins.hInstallThread) {
+            MessageBoxW(NULL, L"Setup could not start the installation.",
+                        L"Nexia IDE Setup", MB_OK | MB_ICONERROR);
+            return 1;
+        }
+    }
 
     /* Message loop */
     MSG msg;

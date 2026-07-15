@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.2.4
+
+Nexia IDE now installs per-user and updates itself without a UAC prompt, the way Chrome, Discord and VS Code (User Setup) do.
+
+### Changed
+- **Installs to `%LOCALAPPDATA%\Programs\NexiaIDE` instead of `C:\Program Files\NexiaIDE`.** Program Files is only writable by an administrator, which is what forced every single update through a UAC prompt. A per-user location is writable by the person using it, so updates need no elevation at all. The installer's manifest is now `asInvoker` rather than `requireAdministrator`.
+- **The Add/Remove Programs entry is written to `HKCU`, always.** It previously tried `HKLM` first and fell back to `HKCU` "if no admin rights", so the hive depended on how setup happened to be launched. A per-user install advertised machine-wide would appear for every user on the PC while pointing into one user's private directory.
+- **Existing `C:\Program Files` installs are migrated automatically.** The new install goes to the per-user location and the old copy is retired afterwards. Retiring Program Files needs administrator, so this costs one UAC prompt — once, on the upgrade that migrates the machine. Never again after that. If the prompt is declined, the old copy simply stays on disk; the new install already works.
+
+### Fixed
+- **An update could uninstall the IDE and leave nothing installed.** When setup found an existing install it showed a prompt whose `Yes` meant "uninstall and exit". During an update that reads naturally as "yes, replace the old files" — choosing it removed Nexia IDE and quit. Updates are now silent and never show this prompt at all; the interactive wording has been reversed so `Yes` means *update* and the destructive choice is explicit.
+- **Updates install themselves with no clicks.** Setup accepts `/S`, and the IDE uses it.
+- **A silent update could overwrite files the running IDE still had open.** The wizard never hit this because a human takes seconds to click through, by which time the app has exited; silent mode starts extracting immediately. Setup now waits for the previous copy to release its files before extracting.
+- **`/uninstall` was matched against the whole command line, including the EXE path.** Any user whose path contained `/uninstall` or `-uninstall` would have had setup silently uninstall instead of install. Arguments are tokenised properly now.
+
 ## v2.2.3
 
 ### Fixed

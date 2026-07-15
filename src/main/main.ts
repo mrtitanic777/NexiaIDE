@@ -855,16 +855,45 @@ function registerIpcHandlers() {
         try {
             if (!filePath || !fs.existsSync(filePath)) return { success: false, error: 'Installer not found' };
 
-            // NexiaSetup.exe's manifest is requestedExecutionLevel=requireAdministrator.
-            // child_process.spawn goes through CreateProcess, which CANNOT elevate —
-            // Windows fails it with ERROR_ELEVATION_REQUIRED, surfacing as EACCES.
-            // shell.openPath uses ShellExecute, which raises the UAC prompt properly.
-            const err = await shell.openPath(filePath);
-            if (err) return { success: false, error: err };
+            // Launch setup unattended: /S installs with no prompts and no wizard.
+            //
+            // spawn is usable again because the installer is asInvoker now. It used
+            // to be requireAdministrator, and spawn goes through CreateProcess,
+            // which cannot elevate — Windows failed it with ERROR_ELEVATION_REQUIRED
+            // (surfacing as EACCES). shell.openPath elevated correctly but cannot
+            // pass arguments, so it could never request /S.
+            //
+            // Setup waits for this process to release its files before extracting,
+            // so quitting promptly is what lets the update proceed.
+            const { spawn } = require('child_process');
+            const child = spawn(filePath, ['/S'], {
+                detached: true,       // must outlive us — we are what it replaces
+                stdio: 'ignore',
+            });
 
-            // Give the shell a moment to hand off before we exit, otherwise quitting
-            // can race the launch.
-            setTimeout(() => app.quit(), 1500);
+            // spawn reports failure through an asynchronous 'error' event rather
+            // than throwing, so the try/catch around this cannot see it. Unhandled,
+            // it becomes an uncaught exception and Electron shows a raw crash
+            // dialog — which is exactly how the old EACCES surfaced to users.
+            const launched = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
+                let settled = false;
+                child.once('error', (e: any) => {
+                    if (settled) return;
+                    settled = true;
+                    resolve({ ok: false, error: e?.message || String(e) });
+                });
+                // No 'error' within a moment means CreateProcess accepted it.
+                setTimeout(() => {
+                    if (settled) return;
+                    settled = true;
+                    resolve({ ok: true });
+                }, 1000);
+            });
+
+            if (!launched.ok) return { success: false, error: launched.error };
+
+            child.unref();
+            setTimeout(() => app.quit(), 500);
             return { success: true };
         } catch (err: any) {
             return { success: false, error: err.message };

@@ -4,7 +4,20 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+        <!-- asInvoker, NOT requireAdministrator.
+
+           Nexia IDE installs per-user into %LOCALAPPDATA%\Programs\NexiaIDE, so
+           nothing here needs elevation and updates run without a UAC prompt.
+           This is why Chrome, Discord and VS Code (User Setup) install per-user.
+
+           requireAdministrator also broke the updater: the IDE launched this EXE
+           with child_process.spawn -> CreateProcess, which cannot elevate, so
+           Windows failed it with ERROR_ELEVATION_REQUIRED (surfaced as EACCES).
+
+           The one step that genuinely needs admin (vcredist_x86.exe, a
+           system-wide runtime) elevates itself via ShellExecuteEx, and only on a
+           first install where the runtime is missing. Updates never hit it. -->
+      <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
       </requestedPrivileges>
     </security>
   </trustInfo>
