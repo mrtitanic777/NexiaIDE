@@ -453,6 +453,7 @@
                         <div class="pp-tree-header" data-section="general">Configuration Properties</div>
                         <div class="pp-tree-item active" data-page="general">General</div>
                         <div class="pp-tree-item" data-page="debugging">Debugging</div>
+                        <div class="pp-tree-item" data-page="references">References</div>
                         <div class="pp-tree-item" data-page="vc-directories">VC++ Directories</div>
                     </div>
                     <div class="pp-tree-section">
@@ -683,6 +684,19 @@
                         <div class="pp-grid-row"><span>Additional Library Directories</span><input type="text" id="pp-link-libdirs"></div>
                         <div class="pp-grid-row"><span>Enable Incremental Linking</span>
                             <select id="pp-link-incremental"><option value="default">Default</option><option value="true">Yes (/INCREMENTAL)</option><option value="false">No (/INCREMENTAL:NO)</option></select></div>
+                    </div>
+
+                    <!-- ═══ References ═══ -->
+                    <div class="pp-page" id="pp-page-references">
+                        <div class="pp-grid-section">Project References</div>
+                        <div class="pp-ref-help">
+                            A referenced project is built before this one, and the .lib it produces is
+                            linked automatically along with its include folder — you don't add either by hand.
+                        </div>
+                        <div id="pp-ref-list" class="pp-ref-list"></div>
+                        <div class="pp-ref-actions">
+                            <button id="pp-ref-add" class="pp-ref-btn">Add Reference…</button>
+                        </div>
                     </div>
 
                     <!-- ═══ Linker Input ═══ -->

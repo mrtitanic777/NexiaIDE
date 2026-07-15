@@ -91,6 +91,31 @@ export interface SolutionInfo {
     projects: SolutionProject[];
 }
 
+/**
+ * A XUI content build: .xui scenes in, one .xzp archive out.
+ *
+ * Paths are relative to the project's Media folder, and xuipkg is run with that
+ * folder as its working directory. That is not incidental — xuipkg stores each
+ * input's path *as given* inside the archive, so the resource locator a title
+ * uses at runtime is determined by how the tool was invoked at build time. The
+ * XDK's own sample is built from its project folder with `..\..\media\xui\`
+ * inputs, so its archive holds entries literally named
+ * `..\..\Media\xui\simple_scene.xur`, and it needs ATG's MediaLocator to scan
+ * the archive at runtime and work out that prefix again.
+ *
+ * Running from Media with `xui\scene.xui` instead stores `xui\scene.xur`, so
+ * the locator is just `file://game:/media/<archive>#xui\scene.xur` — a constant
+ * the template can hardcode, with no scan and no ATG dependency.
+ */
+export interface XuiContent {
+    /** Archive name, written to <OutDir>\media\<package>. */
+    package: string;
+    /** .xui sources to compile, relative to the project's Media folder. */
+    scenes: string[];
+    /** Files copied verbatim into <OutDir>\media — fonts, mostly. */
+    copy: string[];
+}
+
 export interface ProjectConfig {
     name: string;
     path: string;
@@ -120,6 +145,32 @@ export interface ProjectConfig {
     /** The VS solution this was imported from, for the Solution Explorer. */
     solution?: SolutionInfo;
     pchHeader?: string;  // Precompiled header name, e.g. "stdafx.h"
+
+    /**
+     * Other Nexia projects this one links against, as paths to their folders.
+     *
+     * Each is built before this project, and the .lib it produces is added to
+     * this project's link line along with its include directory. Relative paths
+     * are resolved against this project's folder, so a solution folder can be
+     * moved or shared without every reference breaking.
+     *
+     * Before this existed, the only way to consume a static library you had
+     * just built was to type its .lib name into Project Properties by hand and
+     * add its output folder to the library paths — and nothing rebuilt it when
+     * its sources changed.
+     */
+    projectReferences?: string[];
+
+    /**
+     * XUI content to build. Only XUI projects set this.
+     *
+     * Scenes are authored as .xui XML and are useless to the console in that
+     * form: xuipkg compiles each to a binary .xur and packs them into an .xzp
+     * archive, which the title opens at runtime through a resource locator.
+     * Without this step a XUI project compiles, links, and then fails on the
+     * console when it cannot find its scene.
+     */
+    xuiContent?: XuiContent;
 
     // ── Advanced Compiler/Linker Settings ──
     enableRtti?: boolean;                    // /GR (true) or /GR- (false, default)
@@ -153,6 +204,19 @@ export interface ProjectTemplate {
     icon: string;
     files: { path: string; content: string }[];
     config: Partial<ProjectConfig>;
+    /**
+     * Files copied out of the installed XDK rather than generated.
+     *
+     * `from` is relative to the SDK root. This exists for XUI, whose skin is
+     * 424 KB of generated XML and whose font is 6.6 MB — neither is something
+     * to vendor into this repo, and both are already on the machine of anyone
+     * who can build for the Xbox 360 at all. Copying from the user's own
+     * install also means the assets always match their SDK version.
+     *
+     * A template that declares these cannot be created without a configured
+     * SDK, so create() fails with that reason rather than half-writing.
+     */
+    sdkFiles?: { from: string; to: string }[];
 }
 
 // ── Build Types ──

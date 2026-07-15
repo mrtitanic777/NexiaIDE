@@ -48,6 +48,8 @@ export function initProjectProperties(deps: ProjectPropertiesDeps) {
         sec.addEventListener('click', () => sec.classList.toggle('collapsed'));
     });
 
+    document.getElementById('pp-ref-add')?.addEventListener('click', addReference);
+
     // Description bar
     _$$('.pp-grid-row').forEach(row => {
         row.addEventListener('focusin', () => {
@@ -97,6 +99,123 @@ function ppVal(id: string): string {
 function ppSet(id: string, val: string | undefined | null) {
     const el = _$(id) as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
     if (el) el.value = val || '';
+}
+
+const nodePathPP = require('path');
+const nodeFsPP = require('fs');
+
+/**
+ * References being edited, staged until Apply/OK.
+ *
+ * Every other field on this dialog is read out of the DOM by
+ * applyProjectProperties, so Cancel discards it by simply never reading it.
+ * References have no input to hold them, so without this the Add and Remove
+ * buttons would edit the live project and Cancel would not cancel.
+ */
+let _refsDraft: string[] = [];
+
+function escPP(s: string): string {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/**
+ * Draw the project's references.
+ *
+ * Each row is checked against disk as it's drawn rather than only at build
+ * time: a reference to a project that has been moved or deleted is a build
+ * failure minutes later with a message about a missing .lib, and the place to
+ * notice it is the list that shows it.
+ */
+function renderReferences() {
+    const list = document.getElementById('pp-ref-list');
+    if (!list) return;
+    const proj = _getCurrentProject();
+    const refs = _refsDraft;
+
+    if (refs.length === 0) {
+        list.innerHTML = '<div class="pp-ref-empty">No references.<br>Add one to build and link another project automatically.</div>';
+        return;
+    }
+
+    list.innerHTML = '';
+    refs.forEach((ref, i) => {
+        const abs = nodePathPP.resolve(proj.path, ref);
+        let name = nodePathPP.basename(abs);
+        let missing = false;
+        try {
+            const cfgPath = nodePathPP.join(abs, 'nexia.json');
+            if (nodeFsPP.existsSync(cfgPath)) {
+                name = JSON.parse(nodeFsPP.readFileSync(cfgPath, 'utf-8')).name || name;
+            } else {
+                missing = true;
+            }
+        } catch { missing = true; }
+
+        const row = document.createElement('div');
+        row.className = 'pp-ref-item';
+        row.innerHTML = `
+            <span class="pp-ref-item-icon">📦</span>
+            <span class="pp-ref-item-name">${escPP(name)}</span>
+            ${missing ? '<span class="pp-ref-item-bad">not found</span>' : ''}
+            <span class="pp-ref-item-path" title="${escPP(abs)}">${escPP(ref)}</span>
+            <button class="pp-ref-item-remove" title="Remove reference">✕</button>`;
+        row.querySelector('.pp-ref-item-remove')!.addEventListener('click', () => {
+            _refsDraft.splice(i, 1);
+            renderReferences();
+        });
+        list.appendChild(row);
+    });
+}
+
+/** Add a reference by picking another project's folder. */
+async function addReference() {
+    const proj = _getCurrentProject();
+    if (!proj) return;
+
+    const dir = await _ipcRenderer.invoke(_IPC.FILE_SELECT_DIR);
+    if (!dir) return;
+
+    const cfgPath = nodePathPP.join(dir, 'nexia.json');
+    if (!nodeFsPP.existsSync(cfgPath)) {
+        alert("That folder isn't a Nexia project — there's no nexia.json in it.");
+        return;
+    }
+
+    let refCfg: any;
+    try {
+        refCfg = JSON.parse(nodeFsPP.readFileSync(cfgPath, 'utf-8'));
+    } catch (e: any) {
+        alert(`Couldn't read that project: ${e.message}`);
+        return;
+    }
+
+    // Refuse what the build would refuse, at the point where the user can still
+    // easily pick something else.
+    if (nodePathPP.resolve(dir).toLowerCase() === nodePathPP.resolve(proj.path).toLowerCase()) {
+        alert("A project can't reference itself.");
+        return;
+    }
+    if (refCfg.type === 'executable') {
+        alert(`${refCfg.name} builds an executable. Only libraries can be referenced.`);
+        return;
+    }
+
+    // Relative, so moving a folder of related projects doesn't break every
+    // reference in it. Absolute only when they're on different drives, where no
+    // relative path exists.
+    let rel = nodePathPP.relative(proj.path, dir);
+    if (!rel || rel.startsWith('..' + nodePathPP.sep) === false && nodePathPP.isAbsolute(rel)) rel = dir;
+    if (nodePathPP.resolve(proj.path, rel).toLowerCase() !== nodePathPP.resolve(dir).toLowerCase()) rel = dir;
+
+    const already = _refsDraft.some((r) =>
+        nodePathPP.resolve(proj.path, r).toLowerCase() === nodePathPP.resolve(dir).toLowerCase());
+    if (already) {
+        alert(`${refCfg.name} is already referenced.`);
+        return;
+    }
+
+    _refsDraft.push(rel.split(nodePathPP.sep).join('/'));
+    renderReferences();
 }
 
 export function openProjectProperties() {
@@ -181,6 +300,10 @@ export function openProjectProperties() {
 
     // C/C++ Command Line
     ppSet('pp-cpp-extra', proj.additionalCompilerFlags || '');
+
+    // References — staged so Cancel discards them like every other field.
+    _refsDraft = [...(proj.projectReferences || [])];
+    renderReferences();
 
     // Linker
     ppSet('pp-link-libdirs', (proj.libraryDirectories || []).join(';'));
@@ -317,6 +440,10 @@ export function applyProjectProperties() {
 
     // C/C++ Command Line
     proj.additionalCompilerFlags = ppVal('pp-cpp-extra').trim() || undefined;
+
+    // References — commit the staged list.
+    if (_refsDraft.length > 0) proj.projectReferences = [..._refsDraft];
+    else delete proj.projectReferences;
 
     // Linker
     proj.libraries = ppVal('pp-link-deps').split(';').filter(s => s.trim());

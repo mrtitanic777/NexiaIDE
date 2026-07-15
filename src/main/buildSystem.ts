@@ -129,7 +129,12 @@ export class BuildSystem {
         }
     }
 
-    private async runBuild(project: ProjectConfig, config?: Partial<BuildConfig>): Promise<BuildResult> {
+    /**
+     * @param chain Resolved paths of the projects already being built above this
+     *        one, for cycle detection. A -> B -> A would otherwise recurse until
+     *        the stack gives out.
+     */
+    private async runBuild(project: ProjectConfig, config?: Partial<BuildConfig>, chain: string[] = []): Promise<BuildResult> {
         const startTime = Date.now();
         const errors: BuildMessage[] = [];
         const warnings: BuildMessage[] = [];
@@ -176,6 +181,41 @@ export class BuildSystem {
         const unsuccessfulMarker = path.join(buildConfig.outputDir, `${project.name}.unsuccessfulbuild`);
         try { fs.writeFileSync(unsuccessfulMarker, ''); } catch {}
         this.emit(`1>  Creating "${path.relative(project.path, unsuccessfulMarker)}" because "AlwaysCreate" was specified.\n`);
+
+        // ── ProjectReference ──
+        // Build what this project depends on first, then fold each dependency's
+        // .lib and include folder into this build. Visual Studio links the
+        // output of a referenced project automatically ("Link Library
+        // Dependencies" defaults to true) and rebuilds it when its sources
+        // change; both are the point of a reference, so both happen here.
+        const refs = await this.buildReferences(project, buildConfig, chain);
+        fullOutput += refs.output;
+        if (refs.errors.length > 0) {
+            errors.push(...refs.errors);
+            const duration = Date.now() - startTime;
+            this.emitFailure(project, errors, warnings, duration, unsuccessfulMarker);
+            return { success: false, errors, warnings, output: fullOutput, duration };
+        }
+
+        // From here on, `project` carries its dependencies' libraries and
+        // includes. Flattened for this one configuration: a per-configuration
+        // override *replaces* the flat list rather than adding to it, so
+        // appending to project.libraries would be silently dropped by any
+        // project that has a `configurations` entry — XUI has one.
+        if (refs.libs.length || refs.includes.length || refs.libDirs.length) {
+            const eff = effectiveSettings(project, configuration);
+            project = {
+                ...project,
+                libraries: [...eff.libraries, ...refs.libs],
+                defines: eff.defines,
+                includeDirectories: [...eff.includeDirectories, ...refs.includes],
+                libraryDirectories: [...eff.libraryDirectories, ...refs.libDirs],
+                runtimeLibrary: eff.runtimeLibrary,
+                // Already folded in above; leaving it would re-apply the
+                // override and undo the merge.
+                configurations: undefined,
+            };
+        }
 
         // ── ClCompile ──
         // Discover all source files: merge config list with directory scan
@@ -448,6 +488,20 @@ export class BuildSystem {
                 } else {
                     this.emit(`1>  ${exeName} is up to date.\n`);
                 }
+            }
+        }
+
+        // ── XuiPackage ──
+        // After linking, because it writes beside the XEX rather than into it,
+        // and because a compile error should surface before a content error.
+        if (project.xuiContent && errors.length === 0) {
+            const xuiResult = await this.buildXuiContent(project, buildConfig);
+            fullOutput += xuiResult.output;
+            errors.push(...xuiResult.errors);
+            if (xuiResult.errors.length > 0) {
+                const duration = Date.now() - startTime;
+                this.emitFailure(project, errors, warnings, duration, unsuccessfulMarker);
+                return { success: false, errors, warnings, output: fullOutput, duration };
             }
         }
 
@@ -812,6 +866,196 @@ export class BuildSystem {
     }
 
     /**
+     * Build every project this one references, and report what to link.
+     *
+     * Each reference is a path to another Nexia project's folder. It is built to
+     * its own out\<Configuration> in the same configuration as this build — a
+     * Debug title must not link a Release library, since they disagree about
+     * which CRT they were compiled against and the link either fails or produces
+     * something that crashes on the console.
+     *
+     * Returns the .lib names to link, the folders to find them in, and the
+     * referenced projects' include directories.
+     */
+    private async buildReferences(
+        project: ProjectConfig,
+        buildConfig: BuildConfig,
+        chain: string[],
+    ): Promise<{ libs: string[]; libDirs: string[]; includes: string[]; errors: BuildMessage[]; output: string }> {
+        const empty = { libs: [], libDirs: [], includes: [], errors: [], output: '' };
+        const references = project.projectReferences || [];
+        if (references.length === 0) return empty;
+
+        const fail = (message: string) => ({
+            libs: [], libDirs: [], includes: [], output: message + '\n',
+            errors: [{ file: '', line: 0, column: 0, message, severity: 'error' as const }],
+        });
+
+        // Original case is kept for display; comparisons lowercase both sides
+        // because NTFS does.
+        const self = path.resolve(project.path);
+        const libs: string[] = [];
+        const libDirs: string[] = [];
+        const includes: string[] = [];
+        let output = '';
+
+        this.emit(`1>ProjectReference:\n`);
+
+        for (const ref of references) {
+            // Relative to this project, so a folder of related projects can be
+            // moved or shared without every reference breaking.
+            const refDir = path.resolve(project.path, ref);
+
+            if (refDir.toLowerCase() === self.toLowerCase()) {
+                return fail(`${project.name} references itself.`);
+            }
+
+            // Name the whole loop — "a cycle exists" is useless when the chain
+            // is four projects long. The cycle runs from wherever this
+            // reference already appears in the chain, through the project being
+            // built right now, and back to the reference.
+            const at = chain.findIndex(c => c.toLowerCase() === refDir.toLowerCase());
+            if (at >= 0) {
+                const loop = [...chain.slice(at), self, refDir].map(p => path.basename(p)).join(' → ');
+                return fail(`Circular project reference: ${loop}`);
+            }
+
+            const refConfigPath = path.join(refDir, 'nexia.json');
+            if (!fs.existsSync(refConfigPath)) {
+                return fail(`${project.name} references "${ref}", but there's no Nexia project there (looked for ${refConfigPath}).`);
+            }
+
+            let refProject: ProjectConfig;
+            try {
+                refProject = JSON.parse(fs.readFileSync(refConfigPath, 'utf-8'));
+            } catch (e: any) {
+                return fail(`Couldn't read the referenced project at ${refDir}: ${e.message}`);
+            }
+            // Trust the folder we found it in, not the path recorded inside —
+            // the project may have been moved since it was written.
+            refProject.path = refDir;
+
+            if (refProject.type === 'executable') {
+                return fail(`${project.name} references ${refProject.name}, which builds an executable. Only libraries can be referenced.`);
+            }
+
+            this.emit(`1>  ${refProject.name}\n`);
+
+            const refOut = path.join(refDir, 'out', buildConfig.configuration);
+            const result = await this.runBuild(refProject, {
+                configuration: buildConfig.configuration,
+                outputDir: refOut,
+            }, [...chain, self]);
+            output += result.output;
+
+            if (!result.success) {
+                return {
+                    libs: [], libDirs: [], includes: [], output,
+                    errors: [
+                        ...result.errors,
+                        { file: '', line: 0, column: 0, severity: 'error' as const,
+                          message: `${project.name} was not built: its reference ${refProject.name} failed to build.` },
+                    ],
+                };
+            }
+
+            // A dll's import library and a static lib's archive are both
+            // <name>.lib and both are what you link against.
+            const libName = `${refProject.name}.lib`;
+            if (!fs.existsSync(path.join(refOut, libName))) {
+                return fail(`${refProject.name} built without producing ${libName}, so ${project.name} has nothing to link.`);
+            }
+            libs.push(libName);
+            libDirs.push(refOut);
+
+            // So the dependent project can #include the library's headers
+            // without spelling out a relative path to them.
+            for (const inc of (refProject.includeDirectories || [])) {
+                includes.push(path.resolve(refDir, inc));
+            }
+        }
+
+        this.emit(`1>\n`);
+        return { libs, libDirs, includes, errors: [], output };
+    }
+
+    /**
+     * Compile a project's .xui scenes into an .xzp package beside the XEX.
+     *
+     * xuipkg compiles each .xui to a binary .xur as it packs it, and stores each
+     * entry under the path it was *given* — not the file's absolute location. So
+     * the working directory is the project's Media folder and the inputs are
+     * relative to it ("xui\scene.xui" -> "xui\scene.xur"), which makes the
+     * runtime locator a constant the template hardcodes. Run it from anywhere
+     * else and the entry names change, the locator stops matching, and the title
+     * fails to find its scene on the console with everything still building
+     * perfectly on the PC.
+     *
+     * /O rather than /A: append leaves entries from previous builds in the
+     * archive, so a renamed scene would ship alongside its own ghost.
+     */
+    private async buildXuiContent(
+        project: ProjectConfig,
+        buildConfig: BuildConfig
+    ): Promise<{ output: string; errors: BuildMessage[] }> {
+        const content = project.xuiContent!;
+        const err = (message: string): { output: string; errors: BuildMessage[] } => ({
+            output: message + '\n',
+            errors: [{ file: '', line: 0, column: 0, message, severity: 'error' }],
+        });
+
+        this.emit(`1>XuiPackage:\n`);
+
+        const xuipkg = this.toolchain.getToolPath('xuipkg.exe');
+        if (!xuipkg) return err('xuipkg.exe not found in the SDK — cannot build XUI content.');
+
+        const mediaDir = path.join(project.path, 'Media');
+        if (!fs.existsSync(mediaDir)) return err(`This project has XUI content but no Media folder: ${mediaDir}`);
+
+        // xuipkg reports a missing input as a bare "file(s) not found" with no
+        // clue which one, so check first and name it.
+        for (const scene of content.scenes) {
+            const p = path.join(mediaDir, scene);
+            if (!fs.existsSync(p)) return err(`XUI scene not found: ${p}`);
+        }
+
+        const outMedia = path.join(buildConfig.outputDir, 'media');
+        fs.mkdirSync(outMedia, { recursive: true });
+        const pkgPath = path.join(outMedia, content.package);
+
+        this.emit(`1>  ${content.package}\n`);
+        const result = await this.runTool(
+            xuipkg,
+            ['/nologo', '/o', `"${pkgPath}"`, ...content.scenes.map(s => `"${s}"`)],
+            '',
+            mediaDir,
+        );
+
+        for (const line of result.rawLines) this.emit(`1>  ${line}\n`);
+        if (result.errors.length > 0) return { output: result.output, errors: result.errors };
+
+        // xuipkg can report success and still produce nothing if every input was
+        // skipped. Not shipping a scene is not a successful build.
+        if (!fs.existsSync(pkgPath)) return err(`xuipkg reported success but produced no ${content.package}.`);
+
+        // Loose files — the font. Not packed, because RegisterDefaultTypeface
+        // takes a plain file locator rather than an archive one.
+        for (const rel of content.copy) {
+            const src = path.join(mediaDir, rel);
+            if (!fs.existsSync(src)) return err(`XUI content file not found: ${src}`);
+            const dest = path.join(outMedia, path.basename(rel));
+            try {
+                fs.copyFileSync(src, dest);
+                this.emit(`1>  ${path.basename(rel)}\n`);
+            } catch (e: any) {
+                return err(`Couldn't copy ${path.basename(rel)}: ${e.message}`);
+            }
+        }
+
+        return { output: result.output, errors: [] };
+    }
+
+    /**
      * Build XEX from executable.
      */
     private async buildXex(
@@ -1037,7 +1281,14 @@ export class BuildSystem {
     /**
      * Run a tool and parse output for errors/warnings.
      */
-    private runTool(toolPath: string, args: string[], contextFile: string): Promise<{ output: string; errors: BuildMessage[]; warnings: BuildMessage[]; rawLines: string[] }> {
+    /**
+     * @param cwd Working directory to run the tool in. Defaults to the tool's
+     *        own directory (see below). Only pass this when the tool's output
+     *        depends on where it was run — xuipkg records each input path as
+     *        given, so its cwd determines the names stored in the archive and
+     *        therefore the resource locators the title needs at runtime.
+     */
+    private runTool(toolPath: string, args: string[], contextFile: string, cwd?: string): Promise<{ output: string; errors: BuildMessage[]; warnings: BuildMessage[]; rawLines: string[] }> {
         return new Promise((resolve) => {
             const env = this.toolchain.getToolEnvironment();
             let proc: ChildProcess;
@@ -1048,7 +1299,7 @@ export class BuildSystem {
                 // Set cwd to the tool's directory so Windows DLL search finds sibling
                 // DLLs (c1.dll, c1xx.dll, c2.dll, mspdb*.dll, MSVC runtimes, etc.)
                 const toolDir = path.dirname(toolPath);
-                proc = spawn(quotedTool, args, { env, cwd: toolDir, shell: true, windowsHide: true });
+                proc = spawn(quotedTool, args, { env, cwd: cwd || toolDir, shell: true, windowsHide: true });
             } catch (err: any) {
                 resolve({
                     output: err.message,

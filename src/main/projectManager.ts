@@ -73,6 +73,28 @@ const STDAFX_CPP = `/**
 #include "stdafx.h"
 `;
 
+const XUI_MEDIA_README = `XUI content
+===========
+
+scene.xui  The scene: two buttons and a text element. Its ClassOverride
+           property is "MyMainScene", which must keep matching the name in
+           XUI_IMPLEMENT_CLASS in the .cpp — if they drift apart the framework
+           builds a plain scene instead and your handlers never run.
+
+skin.xui   Visual styles the scene's controls refer to.
+
+xarialuni.ttf
+           The default typeface. Text renders as nothing without it.
+
+All three were copied from your Xbox 360 SDK when this project was created
+(Source\\Samples\\media\\xui). Edit them with XuiTool.exe from the SDK's
+bin\\win32 folder.
+
+Building the project compiles every .xui here into a binary .xur and packs
+them into media\\<Project>.xzp next to the XEX, and copies the font beside it.
+Both are loaded at runtime through file://game:/media/ locators.
+`;
+
 // ── Template Source Files ──
 
 /**
@@ -401,84 +423,158 @@ void __cdecl main() {
 }
 `;
 
+/**
+ * The XUI template's entry point.
+ *
+ * Modelled directly on the XDK's own XuiTutorial sample
+ * (Source\Samples\ui\XuiTutorial), because the version this replaces was
+ * invented. It called XuiRenderInitShared with a TypefaceDescriptor where a
+ * texture loader goes, passed a D3DDevice* where an HXUIDC belongs, and called
+ * XuiRenderSetWorld, which does not exist at all. It had never once compiled.
+ *
+ * The real framework does not want a hand-written render loop: CXuiModule::Run
+ * owns the frame — timers, input, render, present — and the application only
+ * supplies scene classes and a message map.
+ *
+ * No ATG::MediaLocator, unlike the sample. That class exists to scan the
+ * archive at runtime for the prefix xuipkg baked into it, which is only
+ * necessary because the sample packs its scenes with '..\..\media\xui\' paths.
+ * Nexia runs xuipkg from the project's Media folder, so entries are named
+ * 'xui\scene.xur' and the locators below are constants.
+ *
+ * Backslashes are not a style choice: xuipkg rejects forward-slash inputs
+ * outright ("file(s) not found"), so the paths it stores always use them.
+ */
 const XUI_MAIN = `/**
- * Xbox 360 XUI Application Template
- * Initializes D3D and the XUI framework.
+ * __PROJECT__.cpp — XUI application entry point.
  */
 
 #include "stdafx.h"
 #include <xui.h>
 #include <xuiapp.h>
 
-class CMyApp : public CXuiModule
+//--------------------------------------------------------------------------------------
+// Where the scenes live at runtime.
+//
+// The build packs the project's Media xui folder into media/__PROJECT__.xzp
+// beside the XEX, keeping the "xui" prefix on each entry. '#' separates the
+// archive from the path within it. The separator inside the archive is a
+// backslash because xuipkg refuses forward-slash inputs.
+//--------------------------------------------------------------------------------------
+#define SCENE_PACKAGE  L"file://game:/media/__PROJECT__.xzp"
+#define SKIN_LOCATOR   SCENE_PACKAGE L"#xui\\\\skin.xur"
+#define SCENE_PATH     SCENE_PACKAGE L"#xui\\\\"
+#define FONT_LOCATOR   L"file://game:/media/xarialuni.ttf"
+
+//--------------------------------------------------------------------------------------
+// Scene class.
+//
+// The name in XUI_IMPLEMENT_CLASS must match the ClassOverride property on the
+// scene in scene.xui. If they disagree the framework quietly builds a plain
+// scene instead and none of the handlers below ever run.
+//--------------------------------------------------------------------------------------
+class CMyMainScene : public CXuiSceneImpl
 {
+protected:
+    CXuiControl     m_button1;
+    CXuiControl     m_button2;
+    CXuiTextElement m_text1;
+
+    XUI_BEGIN_MSG_MAP()
+        XUI_ON_XM_INIT( OnInit )
+        XUI_ON_XM_NOTIFY_PRESS( OnNotifyPress )
+    XUI_END_MSG_MAP()
+
+    // Look the controls up once, by the Id each is given in scene.xui.
+    HRESULT OnInit( XUIMessageInit* pInitData, BOOL& bHandled )
+    {
+        GetChildById( L"XuiButton1", &m_button1 );
+        GetChildById( L"XuiButton2", &m_button2 );
+        GetChildById( L"XuiText1", &m_text1 );
+        return S_OK;
+    }
+
+    HRESULT OnNotifyPress( HXUIOBJ hObjPressed, BOOL& bHandled )
+    {
+        if( hObjPressed == m_button1 )
+            m_text1.SetText( L"One" );
+        else if( hObjPressed == m_button2 )
+            m_text1.SetText( L"Two" );
+        else
+            return S_OK;
+
+        bHandled = TRUE;
+        return S_OK;
+    }
+
 public:
-    virtual HRESULT RegisterXuiClasses();
-    virtual HRESULT UnregisterXuiClasses();
+    XUI_IMPLEMENT_CLASS( CMyMainScene, L"MyMainScene", XUI_CLASS_SCENE )
 };
 
-HRESULT CMyApp::RegisterXuiClasses()
+//--------------------------------------------------------------------------------------
+// Application host. Registers scene classes; CXuiModule does everything else.
+//--------------------------------------------------------------------------------------
+class CMyApp : public CXuiModule
 {
-    return S_OK;
-}
-
-HRESULT CMyApp::UnregisterXuiClasses()
-{
-    return S_OK;
-}
-
-CMyApp g_App;
-
-void __cdecl main()
-{
-    // Initialize Direct3D
-    IDirect3D9* pD3D = Direct3DCreate9( D3D_SDK_VERSION );
-
-    D3DPRESENT_PARAMETERS d3dpp;
-    ZeroMemory( &d3dpp, sizeof(d3dpp) );
-    d3dpp.BackBufferWidth  = 1280;
-    d3dpp.BackBufferHeight = 720;
-    d3dpp.BackBufferFormat = D3DFMT_X8R8G8B8;
-    d3dpp.SwapEffect       = D3DSWAPEFFECT_DISCARD;
-    d3dpp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
-
-    IDirect3DDevice9* pd3dDevice = NULL;
-    pD3D->CreateDevice( 0, D3DDEVTYPE_HAL, NULL,
-        D3DCREATE_HARDWARE_VERTEXPROCESSING, &d3dpp, &pd3dDevice );
-
-    // Initialize XUI
-    TypefaceDescriptor typeface = { L"Arial Unicode MS", 0 };
-    XuiRenderInitShared( pd3dDevice, &d3dpp, &typeface );
-
-    HXUIOBJ hScene = NULL;
-    g_App.Init( XuiD3DXTextureLoader, NULL );
-    g_App.LoadSkin( L"game:\\\\skin.xui" );
-    g_App.LoadFirstScene( L"game:\\\\scene.xur", NULL, &hScene );
-
-    // Main loop
-    for( ;; )
+protected:
+    virtual HRESULT RegisterXuiClasses()
     {
-        pd3dDevice->Clear( 0, NULL, D3DCLEAR_TARGET,
-            D3DCOLOR_XRGB( 0, 0, 0 ), 1.0f, 0 );
-
-        pd3dDevice->BeginScene();
-        g_App.RunFrame();
-        XuiTimersRun();
-        XuiRenderBegin( pd3dDevice, D3DCOLOR_ARGB( 255, 0, 0, 0 ) );
-
-        D3DXMATRIX matIdentity;
-        D3DXMatrixIdentity( &matIdentity );
-        XuiRenderSetViewTransform( &matIdentity );
-        XuiRenderSetWorld( &matIdentity );
-
-        HXUIOBJ hRoot = g_App.GetRootObj();
-        XuiRenderDCBegin( hRoot );
-        XuiRenderDCEnd();
-        XuiRenderEnd();
-
-        pd3dDevice->EndScene();
-        pd3dDevice->Present( NULL, NULL, NULL, NULL );
+        return CMyMainScene::Register();
     }
+
+    virtual HRESULT UnregisterXuiClasses()
+    {
+        CMyMainScene::Unregister();
+        return S_OK;
+    }
+};
+
+//--------------------------------------------------------------------------------------
+// Entry point.
+//--------------------------------------------------------------------------------------
+VOID __cdecl main()
+{
+    CMyApp app;
+
+    // Init creates the D3D device and the XUI render context. Do not create a
+    // device before this — CXuiModule owns it.
+    HRESULT hr = app.Init( XuiD3DXTextureLoader );
+    if( FAILED( hr ) )
+    {
+        OutputDebugString( "XUI: Init failed.\\n" );
+        return;
+    }
+
+    // Without a registered typeface, text renders as nothing at all.
+    hr = app.RegisterDefaultTypeface( L"Arial Unicode MS", FONT_LOCATOR );
+    if( FAILED( hr ) )
+    {
+        OutputDebugString( "XUI: could not register the default typeface.\\n" );
+        app.Uninit();
+        return;
+    }
+
+    // Skin first: it defines the visuals the scene's controls refer to.
+    hr = app.LoadSkin( SKIN_LOCATOR );
+    if( FAILED( hr ) )
+    {
+        OutputDebugString( "XUI: could not load skin.xur.\\n" );
+        app.Uninit();
+        return;
+    }
+
+    hr = app.LoadFirstScene( SCENE_PATH, L"scene.xur", NULL );
+    if( FAILED( hr ) )
+    {
+        OutputDebugString( "XUI: could not load scene.xur.\\n" );
+        app.Uninit();
+        return;
+    }
+
+    // Owns the frame loop; returns when the application exits.
+    app.Run();
+
+    app.Uninit();
 }
 `;
 
@@ -560,6 +656,14 @@ void __cdecl main()
 export class ProjectManager {
     private currentProject: ProjectConfig | null = null;
 
+    /**
+     * Optional, and only used to resolve a template's sdkFiles. Passing it is
+     * what lets the XUI template copy its scene, skin and font out of the
+     * user's install; without it, templates that declare sdkFiles refuse to be
+     * created rather than producing a project that cannot build.
+     */
+    constructor(private toolchain?: { getPaths(): { root: string } | null }) {}
+
     getCurrent(): ProjectConfig | null {
         return this.currentProject;
     }
@@ -605,18 +709,46 @@ export class ProjectManager {
             {
                 id: 'xui-app',
                 name: 'XUI Application',
-                description: 'Xbox 360 app with XUI-based user interface.',
+                description: 'Buttons and text driven by a XUI scene, packaged for the console.',
                 icon: '🎨',
                 files: [
-                    { path: 'src/stdafx.h', content: STDAFX_H + '\n// XUI\n#include <xui.h>\n' },
+                    { path: 'src/stdafx.h', content: STDAFX_H + '\n// XUI\n#include <xui.h>\n#include <xuiapp.h>\n' },
                     { path: 'src/stdafx.cpp', content: STDAFX_CPP },
                     { path: 'src/__PROJECT__.cpp', content: XUI_MAIN },
+                    { path: 'Media/xui/README.txt', content: XUI_MEDIA_README },
+                ],
+                // The scene, its skin and the font come from the user's own XDK.
+                // The skin is 424 KB of generated XML and the font is 6.6 MB;
+                // neither belongs in this repo, and both are already present on
+                // any machine that can build for the Xbox 360.
+                sdkFiles: [
+                    { from: 'Source/Samples/media/xui/simple_scene.xui', to: 'Media/xui/scene.xui' },
+                    { from: 'Source/Samples/media/xui/simple_scene_skin.xui', to: 'Media/xui/skin.xui' },
+                    { from: 'Source/Samples/media/xui/xarialuni.ttf', to: 'Media/xui/xarialuni.ttf' },
                 ],
                 config: {
                     type: 'executable', template: 'xui-app',
                     sourceFiles: ['src/stdafx.cpp', 'src/__PROJECT__.cpp'],
                     defines: ['_XBOX'],
-                    libraries: ['xuiruntime.lib', 'xuirender.lib'],
+                    // XUI's libraries are per-configuration, and the flat list
+                    // that was here named xuiruntime.lib, which does not exist
+                    // in the XDK under any configuration — the runtime is
+                    // xuirun.lib. Every name below was checked against lib\xbox.
+                    // The base libraries (d3d9, xapilib, …) come from the build
+                    // system's own per-configuration table, so only the
+                    // XUI-specific ones are listed.
+                    configurations: {
+                        Debug:        { libraries: ['xuirund.lib', 'xuirenderd.lib', 'xmediad2.lib'] },
+                        Profile:      { libraries: ['xuirun.lib', 'xuirender.lib', 'xmedia2.lib'] },
+                        Release:      { libraries: ['xuirun.lib', 'xuirender.lib', 'xmedia2.lib'] },
+                        Release_LTCG: { libraries: ['xuirunltcg.lib', 'xuirenderltcg.lib', 'xmedia2.lib'] },
+                    },
+                    // Compiled by xuipkg at build time into <OutDir>\media.
+                    xuiContent: {
+                        package: '__PROJECT__.xzp',
+                        scenes: ['xui\\scene.xui', 'xui\\skin.xui'],
+                        copy: ['xui\\xarialuni.ttf'],
+                    },
                 },
             },
             {
@@ -788,6 +920,29 @@ int MyLib_DoWork(const char* input, char* output, int outputSize)
         const template = this.getTemplates().find(t => t.id === templateId);
         if (!template) throw new Error(`Template '${templateId}' not found`);
 
+        // Resolve everything that can fail before creating any directories. A
+        // template whose SDK assets are missing must not leave a half-written
+        // project behind — and create() refuses a non-empty folder, so the user
+        // could not simply try again afterwards.
+        const sdkCopies: { src: string; to: string }[] = [];
+        if (template.sdkFiles?.length) {
+            const sdk = this.toolchain?.getPaths();
+            if (!sdk) {
+                throw new Error(
+                    `The ${template.name} template copies its content from the Xbox 360 SDK, ` +
+                    `which isn't configured yet. Set it up in Settings → Advanced → SDK Setup, then try again.`);
+            }
+            for (const f of template.sdkFiles) {
+                const src = path.join(sdk.root, f.from);
+                if (!fs.existsSync(src)) {
+                    throw new Error(
+                        `Your SDK is missing a file this template needs:\n${f.from}\n\n` +
+                        `It should be at:\n${src}`);
+                }
+                sdkCopies.push({ src, to: f.to });
+            }
+        }
+
         const projectDir = path.join(directory, name);
 
         // Never write into a directory that already holds something.
@@ -840,6 +995,14 @@ int MyLib_DoWork(const char* input, char* output, int outputSize)
             fs.writeFileSync(resolved, file.content.replace(NAME_TOKEN, fileName), 'utf-8');
         }
 
+        // Copy content out of the SDK (XUI's scene, skin and font). Already
+        // verified to exist above, so a failure here is a real I/O problem.
+        for (const c of sdkCopies) {
+            const dest = path.join(projectDir, c.to.replace(NAME_TOKEN, fileName));
+            fs.mkdirSync(path.dirname(dest), { recursive: true });
+            fs.copyFileSync(c.src, dest);
+        }
+
         // Create project config
         const config: ProjectConfig = {
             name,
@@ -847,13 +1010,32 @@ int MyLib_DoWork(const char* input, char* output, int outputSize)
             type: template.config.type || 'executable',
             template: template.config.template || 'empty',
             sourceFiles: (template.config.sourceFiles || []).map(f => f.replace(NAME_TOKEN, fileName)),
-            includeDirectories: ['include', 'src'],
+            // A template's own include directories are kept, not replaced: this
+            // used to hardcode ['include', 'src'], so static-lib's declared
+            // 'include' was a no-op that happened to already be in the list.
+            includeDirectories: Array.from(new Set(['include', 'src', ...(template.config.includeDirectories || [])])),
             libraryDirectories: [],
             libraries: template.config.libraries || [],
             defines: template.config.defines || [],
             configuration: 'Debug',
             pchHeader: 'stdafx.h',
         };
+
+        // Per-configuration overrides — XUI's libraries differ per build type,
+        // and this was dropped on the floor before, so the template declared
+        // them and the project never saw them.
+        if (template.config.configurations) {
+            config.configurations = template.config.configurations;
+        }
+
+        if (template.config.xuiContent) {
+            const xc = template.config.xuiContent;
+            config.xuiContent = {
+                package: xc.package.replace(NAME_TOKEN, fileName),
+                scenes: [...xc.scenes],
+                copy: [...xc.copy],
+            };
+        }
 
         // Save project file
         fs.writeFileSync(

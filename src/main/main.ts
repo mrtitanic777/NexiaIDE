@@ -137,7 +137,9 @@ async function initializeServices() {
     emulatorManager.setEventCallback((event) => sendToRenderer(IPC.EMU_EVENT, event));
     sdkTools = new SdkTools(toolchain);
     extensionManager = new ExtensionManager();
-    projectManager = new ProjectManager();
+    // Takes the toolchain so templates can copy content out of the installed
+    // SDK — XUI's scene, skin and font come from there rather than the repo.
+    projectManager = new ProjectManager(toolchain);
 
     // Forward build/tool output to renderer
     buildSystem.setOutputCallback((data) => sendToRenderer(IPC.BUILD_OUTPUT, data));
