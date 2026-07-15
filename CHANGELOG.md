@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.2.2
+
+### Fixed
+- **Updates can now actually install themselves.** The update downloaded and verified correctly, then failed at the last step with `EACCES` and an Electron crash dialog. The installer's manifest requests administrator, and the launch went through `child_process.spawn` → `CreateProcess`, which cannot elevate — Windows rejects it with `ERROR_ELEVATION_REQUIRED`, surfaced as `EACCES`. The installer is now launched via the shell (`ShellExecute`), which raises the UAC prompt properly.
+- **A failed install now reports itself instead of crashing.** `spawn` signals failure through an asynchronous `error` event rather than throwing, so the surrounding `try/catch` never saw it and Node escalated it to an uncaught exception. The launch path is promise-based now, so any failure is shown in the update dialog.
+
+> Because 2.2.0 and 2.2.1 both carry the broken launch step, this build has to be installed by hand once. Updates from 2.2.2 onward install themselves.
+
 ## v2.2.1
 
 ### Fixed

@@ -854,10 +854,17 @@ function registerIpcHandlers() {
     ipcMain.handle('update:install', async (_e, filePath: string) => {
         try {
             if (!filePath || !fs.existsSync(filePath)) return { success: false, error: 'Installer not found' };
-            const { spawn } = require('child_process');
-            const child = spawn(filePath, [], { detached: true, stdio: 'ignore' });
-            child.unref();
-            setTimeout(() => app.quit(), 400);
+
+            // NexiaSetup.exe's manifest is requestedExecutionLevel=requireAdministrator.
+            // child_process.spawn goes through CreateProcess, which CANNOT elevate —
+            // Windows fails it with ERROR_ELEVATION_REQUIRED, surfacing as EACCES.
+            // shell.openPath uses ShellExecute, which raises the UAC prompt properly.
+            const err = await shell.openPath(filePath);
+            if (err) return { success: false, error: err };
+
+            // Give the shell a moment to hand off before we exit, otherwise quitting
+            // can race the launch.
+            setTimeout(() => app.quit(), 1500);
             return { success: true };
         } catch (err: any) {
             return { success: false, error: err.message };
