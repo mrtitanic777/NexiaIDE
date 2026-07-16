@@ -305,3 +305,30 @@ const wchar_t *jv_get_str(const jv *obj, const wchar_t *key, const wchar_t *fall
 {
     return jv_str_or(jv_get(obj, key), fallback);
 }
+
+/*
+ * Free a tree, depth first.
+ *
+ * Every allocation in this file comes from jz(), which is calloc, so every
+ * pointer here is free()able and a NULL member is simply one that was never
+ * populated — free(NULL) is defined, so the checks are for clarity rather than
+ * safety.
+ *
+ * Recursion depth is the document's nesting depth. nexia.json nests three
+ * levels; a hostile file could nest thousands, but jp_value already recurses to
+ * parse it, so anything deep enough to overflow here overflowed on the way in.
+ */
+void jv_free(jv *v)
+{
+    if (!v) return;
+
+    if (v->type == JV_STR) free(v->str);
+
+    for (int i = 0; i < v->count; i++) {
+        if (v->keys) free(v->keys[i]);   /* objects carry a key per child; arrays do not */
+        jv_free(v->items[i]);
+    }
+    free(v->items);
+    free(v->keys);
+    free(v);
+}

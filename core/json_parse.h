@@ -69,4 +69,20 @@ const jv     *jv_at(const jv *v, int i);
 /* Convenience: obj.key as a string, else fallback. */
 const wchar_t *jv_get_str(const jv *obj, const wchar_t *key, const wchar_t *fallback);
 
+/*
+ * Release a tree from jv_parse_utf8 / jv_parse_file. NULL is a no-op.
+ *
+ * This existed as a comment saying the parser never frees, which was true and
+ * harmless while nexia-core only ever ran as a one-shot CLI that exited: the
+ * kernel reclaims faster than any free() loop, and unwinding on the way out is
+ * work for nobody. It stops being harmless the moment these sources are linked
+ * into something that stays running — a native UI, which is the point of moving
+ * this code to C at all. A leak per project opened is invisible in a process
+ * that lives for 40ms and is a bug in one that lives all day.
+ *
+ * Pointers into a freed tree — anything from jv_str_or or jv_get_str — dangle
+ * afterwards. Copy what you need first.
+ */
+void jv_free(jv *v);
+
 #endif

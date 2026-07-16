@@ -11,7 +11,7 @@
  * attributes in the same struct, already filled in.
  */
 #include "nexia.h"
-#include "json.h"
+#include "json_parse.h"
 #include <string.h>
 
 #define PROJECT_FILE L"nexia.json"
@@ -141,54 +141,31 @@ int nx_cmd_project(int argc, wchar_t **argv)
     if (!wcscmp(argv[0], L"read")) {
         wchar_t cfg[NX_PATH];
         nx_join(cfg, NX_PATH, argv[1], PROJECT_FILE);
-        HANDLE h = CreateFileW(cfg, GENERIC_READ, FILE_SHARE_READ, NULL,
-                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (h == INVALID_HANDLE_VALUE) { nx_json_error("no nexia.json found"); return 1; }
 
-        LARGE_INTEGER sz;
-        if (!GetFileSizeEx(h, &sz) || sz.QuadPart > 8u * 1024 * 1024) {
-            CloseHandle(h); nx_json_error("nexia.json is unreadable or absurdly large"); return 1;
-        }
-        char *text = (char *)malloc((size_t)sz.QuadPart + 1);
-        if (!text) { CloseHandle(h); nx_json_error("out of memory"); return 1; }
-        DWORD got = 0;
-        ReadFile(h, text, (DWORD)sz.QuadPart, &got, NULL);
-        text[got] = 0;
-        CloseHandle(h);
-
-        nx_json root, pool[512];
-        if (!nx_json_parse(text, &root, pool, 512)) {
-            free(text); nx_json_error("nexia.json is not valid JSON"); return 1;
-        }
-
-        wchar_t name[NX_PATH] = L"", type[64] = L"", tmpl[64] = L"";
-        nx_json_wstr(nx_json_get(&root, "name"), name, NX_PATH);
-        nx_json_wstr(nx_json_get(&root, "type"), type, 64);
-        nx_json_wstr(nx_json_get(&root, "template"), tmpl, 64);
+        const char *err = NULL;
+        jv *root = jv_parse_file(cfg, &err);
+        if (!root) { nx_json_error(err ? err : "no nexia.json found"); return 1; }
 
         printf("{\"ok\":true,");
-        nx_json_field(stdout, "name", name);   printf(",");
-        nx_json_field(stdout, "type", type);   printf(",");
-        nx_json_field(stdout, "template", tmpl); printf(",");
+        nx_json_field(stdout, "name", jv_get_str(root, L"name", L""));       printf(",");
+        nx_json_field(stdout, "type", jv_get_str(root, L"type", L""));       printf(",");
+        nx_json_field(stdout, "template", jv_get_str(root, L"template", L"")); printf(",");
         /* The path is where we found it, not what the file says. A project that
          * has been moved still opens: open() in the TypeScript does the same, and
          * it is why the six projects in the old Documents folder still work. */
         nx_json_field(stdout, "path", argv[1]);
 
-        const nx_json *srcs = nx_json_get(&root, "sourceFiles");
+        const jv *srcs = jv_get(root, L"sourceFiles");
         printf(",\"sourceFiles\":[");
-        if (srcs && srcs->type == NX_JSON_ARRAY) {
-            int first = 1;
-            for (const nx_json *c = srcs->child; c; c = c->next) {
-                wchar_t s[NX_PATH];
-                if (!nx_json_wstr(c, s, NX_PATH)) continue;
-                if (!first) printf(",");
-                nx_json_str(stdout, s);
-                first = 0;
-            }
+        for (int i = 0; i < jv_count(srcs); i++) {
+            const wchar_t *s = jv_str_or(jv_at(srcs, i), NULL);
+            if (!s) continue;
+            if (i) printf(",");
+            nx_json_str(stdout, s);
         }
         printf("]}\n");
-        free(text);
+
+        jv_free(root);
         return 0;
     }
 
