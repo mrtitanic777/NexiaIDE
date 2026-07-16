@@ -113,6 +113,7 @@ void nx_safe_filename(const wchar_t *name, wchar_t *out, size_t cap);
 
 /* ── json.c — output only. We emit JSON; we never parse it. ── */
 void nx_json_str(FILE *f, const wchar_t *s);   /* a quoted, escaped UTF-8 string */
+void nx_json_str_u8(FILE *f, const char *s);   /* the same, for a string already UTF-8 */
 void nx_json_field(FILE *f, const char *key, const wchar_t *val);
 void nx_json_error(const char *msg);
 

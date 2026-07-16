@@ -47,26 +47,23 @@ void nx_join(wchar_t *out, size_t cap, const wchar_t *a, const wchar_t *b)
 }
 
 /*
- * Emit a wide string as a quoted JSON string.
+ * Emit an already-UTF-8 string as a quoted JSON string.
  *
- * The conversion to UTF-8 happens here and only here: this is the one place a
- * path leaves the program. Backslashes matter — a Windows path is mostly
- * backslashes, and an unescaped one would make the whole document unparseable
- * on the other side.
+ * Backslashes matter — a Windows path is mostly backslashes, and an unescaped
+ * one would make the whole document unparseable on the other side.
+ *
+ * Two entry points, one escaper. The template table is UTF-8 char* (it is C++
+ * source, generated as bytes) while every path is wchar_t*, and both have to
+ * come out of nexia.json escaped identically. Writing the loop twice would mean
+ * two answers to "how is a backslash escaped", which is exactly the duplication
+ * this port exists to remove.
  */
-void nx_json_str(FILE *f, const wchar_t *s)
+void nx_json_str_u8(FILE *f, const char *s)
 {
     fputc('"', f);
     if (!s) { fputc('"', f); return; }
 
-    int need = WideCharToMultiByte(CP_UTF8, 0, s, -1, NULL, 0, NULL, NULL);
-    if (need <= 0) { fputc('"', f); return; }
-
-    char *buf = (char *)malloc((size_t)need);
-    if (!buf) { fputc('"', f); return; }
-    WideCharToMultiByte(CP_UTF8, 0, s, -1, buf, need, NULL, NULL);
-
-    for (const unsigned char *p = (unsigned char *)buf; *p; p++) {
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
         switch (*p) {
         case '"':  fputs("\\\"", f); break;
         case '\\': fputs("\\\\", f); break;
@@ -89,8 +86,24 @@ void nx_json_str(FILE *f, const wchar_t *s)
             else fputc(*p, f);
         }
     }
-    free(buf);
     fputc('"', f);
+}
+
+void nx_json_str(FILE *f, const wchar_t *s)
+{
+    if (!s) { fputs("\"\"", f); return; }
+
+    /* The conversion to UTF-8 happens here and only here: this is the one place
+     * a path leaves the program. */
+    int need = WideCharToMultiByte(CP_UTF8, 0, s, -1, NULL, 0, NULL, NULL);
+    if (need <= 0) { fputs("\"\"", f); return; }
+
+    char *buf = (char *)malloc((size_t)need);
+    if (!buf) { fputs("\"\"", f); return; }
+    WideCharToMultiByte(CP_UTF8, 0, s, -1, buf, need, NULL, NULL);
+
+    nx_json_str_u8(f, buf);
+    free(buf);
 }
 
 void nx_json_field(FILE *f, const char *key, const wchar_t *val)
