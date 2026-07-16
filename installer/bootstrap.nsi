@@ -114,8 +114,13 @@ Var Updated
 !define MUI_ICON   "..\resources\icon.ico"
 !define MUI_UNICON "..\resources\icon.ico"
 
-; VIProductVersion demands four numeric parts; ${VERSION} carries three.
-VIProductVersion "${VERSION}.0"
+; VIProductVersion demands four numeric parts and nothing else, so a prerelease
+; like 3.3.0-dev cannot go here — makensis rejects it outright. VERSION_NUM is
+; the numeric part alone; the full string keeps its tag in the FileVersion and
+; ProductVersion keys below, which are free text and are what a user actually
+; reads in the file's properties. delta.nsi had the same fault and was fixed
+; first; this one only surfaced when a -dev build was packaged.
+VIProductVersion "${VERSION_NUM}.0"
 VIAddVersionKey "ProductName"     "${APPNAME}"
 VIAddVersionKey "FileDescription" "${APPNAME} Setup"
 VIAddVersionKey "CompanyName"     "${COMPANY}"
@@ -419,8 +424,23 @@ Section "Install"
   nsExec::ExecToLog '"$NodeDir\node.exe" "$BuildDir\scripts\copy-assets.js"'
   Pop $0
 
+  ; nexia-core.exe — the Xbox logic, in C.
+  ;
+  ; The one thing in this installer that is not built on the user's machine.
+  ; Everything else here is TypeScript, and tsc came down with npm; a C compiler
+  ; did not, and shipping one to compile 4,600 lines would cost more than the
+  ; 139 KB this weighs. So it travels prebuilt, and lands in dist\ beside the
+  ; JavaScript that calls it.
+  SetOutPath "$BuildDir\dist"
+  File "..\dist\nexia-core.exe"
+
   ${IfNot} ${FileExists} "$BuildDir\dist\main\main.js"
     !insertmacro Fail "The build did not produce dist\main\main.js."
+  ${EndIf}
+
+  ; Checked separately from main.js so the message names the actual problem.
+  ${IfNot} ${FileExists} "$BuildDir\dist\nexia-core.exe"
+    !insertmacro Fail "nexia-core.exe is missing from the installer."
   ${EndIf}
 
   ; ---- 5. Collect the background Electron download ---------------

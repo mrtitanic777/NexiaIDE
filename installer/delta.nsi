@@ -135,6 +135,12 @@ Section "Update"
   File /r "..\dist\main"
   File /r "..\dist\renderer"
   File /r "..\dist\shared"
+  ; nexia-core.exe -- the Xbox logic, in C. It lives in dist\ beside the
+  ; JavaScript and must travel with it: the moment any module calls it, an
+  ; update that left it behind is an IDE that cannot find its own SDK.
+  ; Unlike everything else here it cannot be rebuilt on the user's machine --
+  ; they have no C compiler -- so it ships prebuilt.
+  File "..\dist\nexia-core.exe"
 
   ${IfNot} ${FileExists} "$INSTDIR\resources\app\dist.new\main\main.js"
     RMDir /r "$INSTDIR\resources\app\dist.new"

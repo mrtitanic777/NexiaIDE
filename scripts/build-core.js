@@ -55,7 +55,11 @@ if (!cc) {
 if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
 
 const args = [
-    '-O2', '-Wall', '-Wextra', '-Wno-unused-parameter',
+    // -Os and stripped, not -O2. This binary ships inside an installer whose
+    // whole point is being small: -O2 static is 515 KB, -Os -s is 138 KB, and
+    // nothing here is hot enough for the difference to be measurable — the
+    // expensive things are the compiler and the console, not us.
+    '-Os', '-s', '-Wall', '-Wextra', '-Wno-unused-parameter',
     '-DUNICODE', '-D_UNICODE',
     // Windows 7 is the floor for the IDE itself (it pins Electron 22 for the
     // same reason), so this must not require anything newer.

@@ -5,76 +5,116 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
-import { execSync, execFileSync } from 'child_process';
+import { execSync } from 'child_process';
 import { SdkPaths, SdkTool } from '../shared/types';
-
-/**
- * nexia-core.exe — the SDK search, in C.
- *
- * Beside the JavaScript that calls it, which resolves the same in development
- * and in an install: this file is dist\main\toolchain.js in both, so the binary
- * is always one directory up. Both installers put it there — the delta carries
- * it, and the bootstrap ships it prebuilt because the user has no C compiler.
- */
-function corePath(): string {
-    return path.join(__dirname, '..', 'nexia-core.exe');
-}
 
 export class Toolchain {
     private sdkPaths: SdkPaths | null = null;
     private bundledSdk: boolean = false;
 
     /**
-     * Detect the Xbox 360 SDK.
-     *
-     * The search itself is nexia-core's now. What was here was seventy lines
-     * building a candidate list in a specific order — custom path, then the
-     * bundled SDK, then beside the executable, then the environment, then the
-     * usual install locations — and that order decides which SDK compiles a
-     * user's code on a machine with more than one. It is copied into
-     * core/toolchain.c exactly, and core/test/toolchain-parity.js compares the
-     * two against the real SDK on every run.
-     *
-     * The hints exist because C cannot introspect this process: resourcesPath is
-     * Electron's and execPath is ours. C decides; we supply the facts only we
-     * have.
+     * Get the path to the bundled SDK (shipped with the IDE).
+     */
+    private getBundledSdkPath(): string | null {
+        // Priority order:
+        // 1. extraResources / asarUnpacked paths (executables work here)
+        // 2. Development paths relative to __dirname
+        // Never pick a path inside app.asar — the OS can't spawn executables from there.
+        const resPath = process.resourcesPath || '';
+        const candidates = [
+            path.join(resPath, 'sdk'),
+            path.join(resPath, 'app.asar.unpacked', 'sdk'),
+            path.join(resPath, 'app', 'sdk'),
+            path.join(__dirname, '..', '..', 'sdk'),
+            path.join(__dirname, '..', 'sdk'),
+        ];
+        for (const c of candidates) {
+            try {
+                // Skip paths inside .asar — the OS cannot execute binaries from there
+                if (c.includes('.asar' + path.sep) && !c.includes('.asar.unpacked')) continue;
+                if (fs.existsSync(path.join(c, 'bin')) && fs.existsSync(path.join(c, 'include'))) {
+                    return c;
+                }
+            } catch {}
+        }
+        return null;
+    }
+
+    /**
+     * Detect the Xbox 360 SDK — checks bundled SDK first, then system installs.
      */
     async detect(customPath?: string): Promise<SdkPaths | null> {
-        const args = ['sdk', 'detect'];
-        if (customPath) args.push('--custom', customPath);
-        if (process.resourcesPath) args.push('--resources', process.resourcesPath);
-        args.push('--exe-dir', path.dirname(process.execPath));
+        const candidates: { path: string; bundled: boolean }[] = [];
 
-        let out: string;
-        try {
-            out = execFileSync(corePath(), args, { encoding: 'utf8', windowsHide: true });
-        } catch (err: any) {
-            // No silent fallback to the old TypeScript. Two live implementations
-            // and only one tested means the bug is always in the other one.
-            // src/main/_ts-backup holds the previous version if this ever has to
-            // be reverted, but that is a decision someone makes, not one the
-            // program makes at runtime.
-            throw new Error(
-                `Couldn't run nexia-core.exe, so the Xbox 360 SDK can't be located.\n` +
-                `Expected it at: ${corePath()}\n${err.message}`);
+        // Custom path has highest priority
+        if (customPath) {
+            candidates.push({ path: customPath, bundled: false });
         }
 
-        const res = JSON.parse(out);
-        if (!res.sdk) { this.sdkPaths = null; return null; }
+        // Bundled SDK has second priority (ships with the IDE)
+        const bundled = this.getBundledSdkPath();
+        if (bundled) {
+            candidates.push({ path: bundled, bundled: true });
+        }
 
-        this.bundledSdk = !!res.sdk.bundled;
-        this.sdkPaths = {
-            root: res.sdk.root,
-            bin: res.sdk.bin,
-            binWin32: res.sdk.binWin32,
-            binX64: res.sdk.binX64,
-            include: res.sdk.include,
-            lib: res.sdk.lib,
-            doc: res.sdk.doc,
-            source: res.sdk.source,
-            system: res.sdk.system,
-        };
-        return this.sdkPaths;
+        // Installer-extracted SDK: same directory as the exe
+        // The installer's cab extraction preserves the XDK\ prefix from Microsoft's SDK cabs
+        // so the structure is: <install_dir>\SDK\XDK\bin\, SDK\XDK\include\, etc.
+        const exeDir = path.dirname(process.execPath);
+        candidates.push({ path: path.join(exeDir, 'SDK', 'XDK'), bundled: true });
+        candidates.push({ path: path.join(exeDir, 'sdk', 'XDK'), bundled: true });
+        candidates.push({ path: path.join(exeDir, 'SDK'), bundled: true });
+        candidates.push({ path: path.join(exeDir, 'sdk'), bundled: true });
+        candidates.push({ path: path.join(exeDir, '..', 'SDK', 'XDK'), bundled: true });
+        candidates.push({ path: path.join(exeDir, '..', 'SDK'), bundled: true });
+
+        // Standard installer paths (NexiaSetup.exe extracts here)
+        candidates.push({ path: 'C:\\Program Files\\NexiaIDE\\SDK\\XDK', bundled: true });
+        candidates.push({ path: 'C:\\Program Files\\NexiaIDE\\SDK', bundled: true });
+        candidates.push({ path: 'C:\\Program Files (x86)\\NexiaIDE\\SDK\\XDK', bundled: true });
+
+        // Environment variables
+        const envVars = ['XEDK', 'XEDK_DIR', 'XBOX_SDK', 'XDK'];
+        for (const v of envVars) {
+            if (process.env[v]) candidates.push({ path: process.env[v]!, bundled: false });
+        }
+
+        // Common install paths
+        for (const p of [
+            'C:\\Program Files (x86)\\Microsoft Xbox 360 SDK',
+            'C:\\Program Files\\Microsoft Xbox 360 SDK',
+            'D:\\Microsoft Xbox 360 SDK',
+            'C:\\XEDK',
+            'D:\\XEDK',
+            'C:\\Program Files (x86)\\Microsoft Xbox SDK',
+        ]) {
+            candidates.push({ path: p, bundled: false });
+        }
+
+        for (const candidate of candidates) {
+            if (!candidate.path || !fs.existsSync(candidate.path)) continue;
+
+            const binDir = path.join(candidate.path, 'bin');
+            const includeDir = path.join(candidate.path, 'include');
+
+            if (fs.existsSync(binDir) && fs.existsSync(includeDir)) {
+                this.bundledSdk = candidate.bundled;
+                this.sdkPaths = {
+                    root: candidate.path,
+                    bin: binDir,
+                    binWin32: path.join(binDir, 'win32'),
+                    binX64: path.join(binDir, 'win64'),
+                    include: includeDir,
+                    lib: path.join(candidate.path, 'lib'),
+                    doc: path.join(candidate.path, 'doc'),
+                    source: path.join(candidate.path, 'Source'),
+                    system: path.join(candidate.path, 'system'),
+                };
+                return this.sdkPaths;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -218,21 +258,40 @@ export class Toolchain {
      *   - 'full'    — SDK found with all required directories
      */
     detectInstallState(): 'none' | 'partial' | 'full' {
-        // nexia-core walks the same candidates detect() does and reports the
-        // best state it finds, so the two can't disagree about which SDK they
-        // are describing — which they could when this kept its own shorter list.
-        try {
-            const args = ['sdk', 'state'];
-            if (process.resourcesPath) args.push('--resources', process.resourcesPath);
-            args.push('--exe-dir', path.dirname(process.execPath));
-            const res = JSON.parse(execFileSync(corePath(), args, { encoding: 'utf8', windowsHide: true }));
-            return res.state;
-        } catch {
-            // Only reachable if nexia-core is missing, which detect() has
-            // already failed loudly about. Callers use this to decide whether to
-            // offer SDK setup, so 'none' sends them somewhere useful.
-            return 'none';
+        // Check all candidate paths (same order as detect())
+        const candidates: string[] = [];
+
+        // Environment variables
+        for (const v of ['XEDK', 'XEDK_DIR', 'XBOX_SDK', 'XDK']) {
+            if (process.env[v]) candidates.push(process.env[v]!);
         }
+
+        // Common install paths
+        candidates.push(
+            'C:\\Program Files (x86)\\Microsoft Xbox 360 SDK',
+            'C:\\Program Files\\Microsoft Xbox 360 SDK',
+            'D:\\Microsoft Xbox 360 SDK',
+            'C:\\XEDK',
+            'D:\\XEDK',
+            'C:\\Program Files (x86)\\Microsoft Xbox SDK',
+        );
+
+        // Bundled SDK
+        const bundled = this.getBundledSdkPath();
+        if (bundled) candidates.unshift(bundled);
+
+        for (const sdkPath of candidates) {
+            if (!sdkPath || !fs.existsSync(sdkPath)) continue;
+
+            const hasBin = fs.existsSync(path.join(sdkPath, 'bin'));
+            const hasInclude = fs.existsSync(path.join(sdkPath, 'include'));
+            const hasLib = fs.existsSync(path.join(sdkPath, 'lib'));
+
+            if (hasBin && hasInclude && hasLib) return 'full';
+            if (hasBin && (!hasInclude || !hasLib)) return 'partial';
+        }
+
+        return 'none';
     }
 
     /**
