@@ -169,28 +169,20 @@ export class Toolchain {
      * Returns a list of missing DLL names, or empty if all are found.
      */
     checkRuntimeDependencies(): { missing: string[]; hint: string } {
-        const requiredDlls = ['msvcr100.dll', 'msvcp100.dll'];
-        const missing: string[] = [];
-
-        // Check in SDK bin directories first, then System32/SysWOW64
-        const searchDirs = [
-            ...this.getBinDirectories(),
-            path.join(process.env.SystemRoot || 'C:\\WINDOWS', 'SysWOW64'),
-            path.join(process.env.SystemRoot || 'C:\\WINDOWS', 'System32'),
-        ];
-
-        for (const dll of requiredDlls) {
-            let found = false;
-            for (const dir of searchDirs) {
-                try {
-                    if (fs.existsSync(path.join(dir, dll))) {
-                        found = true;
-                        break;
-                    }
-                } catch {}
-            }
-            if (!found) missing.push(dll);
-        }
+        // nexia-core searches the same places in the same order: the SDK bin
+        // directories first, then SysWOW64, then System32. The hint stays here
+        // because it is a sentence, not a search.
+        //
+        // On failure this reports nothing missing rather than everything. The
+        // caller turns a non-empty list into "your SDK is broken", and a
+        // nexia-core that would not start is not evidence that msvcr100.dll is
+        // absent — it would send people deleting DLLs to fix the wrong problem.
+        let missing: string[] = [];
+        try {
+            const res = JSON.parse(execFileSync(corePath(), ['sdk', 'runtime'],
+                { encoding: 'utf8', windowsHide: true }));
+            missing = res.missing || [];
+        } catch { /* see above */ }
 
         return {
             missing,
