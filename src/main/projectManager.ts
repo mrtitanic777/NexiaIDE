@@ -609,6 +609,18 @@ HRESULT InitD3D()
 }
 
 //-------------------------------------------------------------------------------------
+// Missing-texture fill: solid magenta, per texel. Used with D3DXFillTexture so
+// the Xbox 360's tiled/swizzled texture memory is written correctly — a manual
+// LockRect fills the linear staging in the wrong order and the tiling shows
+// through as coloured stripes. The output is RGBA: (1,0,1,1) = magenta.
+//-------------------------------------------------------------------------------------
+static VOID WINAPI FillMagenta(D3DXVECTOR4* pOut, const D3DXVECTOR2* pTexCoord,
+                               const D3DXVECTOR2* pTexelSize, LPVOID pData) {
+    (void)pTexCoord; (void)pTexelSize; (void)pData;
+    *pOut = D3DXVECTOR4(1.0f, 0.0f, 1.0f, 1.0f);
+}
+
+//-------------------------------------------------------------------------------------
 // InitScene
 //-------------------------------------------------------------------------------------
 HRESULT InitScene() {
@@ -705,19 +717,14 @@ HRESULT InitScene() {
         OutputDebugStringA(buf);
         // Fallback: a solid magenta texture — the classic "missing texture"
         // signal, so a build with no dirt.png in Content\\ is obvious on screen
-        // instead of silently wrong. Guarded so a failed CreateTexture cannot
-        // null-deref into LockRect, and Pitch-correct because a locked surface
-        // is row-padded, not a tight width*4 buffer.
+        // instead of silently wrong. Filled via D3DXFillTexture, which writes
+        // through the Xbox 360's texture tiling correctly; a manual LockRect
+        // fills the linear staging in the wrong order and the tiling leaks
+        // through as coloured stripes. Guarded so a failed create is just an
+        // untextured (not crashing) cube.
         g_pTexture = NULL;
         if (SUCCEEDED(g_pd3dDevice->CreateTexture(4, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_pTexture, NULL)) && g_pTexture) {
-            D3DLOCKED_RECT lr;
-            if (SUCCEEDED(g_pTexture->LockRect(0, &lr, NULL, 0))) {
-                for (int y = 0; y < 4; y++) {
-                    DWORD* row = (DWORD*)((BYTE*)lr.pBits + y * lr.Pitch);
-                    for (int x = 0; x < 4; x++) row[x] = 0xFFFF00FF; // ARGB magenta
-                }
-                g_pTexture->UnlockRect(0);
-            }
+            D3DXFillTexture(g_pTexture, FillMagenta, NULL);
         }
     }
 

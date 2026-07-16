@@ -4,7 +4,7 @@
  *     npx tsc && node scripts/gen-templates.js
  *
  * The project template table, from projectManager.ts's getTemplates().
- * 6 templates, 22 files, 37935 bytes of content.
+ * 6 templates, 22 files, 38506 bytes of content.
  *
  * Proven byte-for-byte against the TypeScript by core/test/templates-parity.js.
  */
@@ -598,6 +598,18 @@ static const nx_tpl_file FILES_hello_world[] = {
         "}\n"
         "\n"
         "//-------------------------------------------------------------------------------------\n"
+        "// Missing-texture fill: solid magenta, per texel. Used with D3DXFillTexture so\n"
+        "// the Xbox 360's tiled/swizzled texture memory is written correctly \342\200\224 a manual\n"
+        "// LockRect fills the linear staging in the wrong order and the tiling shows\n"
+        "// through as coloured stripes. The output is RGBA: (1,0,1,1) = magenta.\n"
+        "//-------------------------------------------------------------------------------------\n"
+        "static VOID WINAPI FillMagenta(D3DXVECTOR4* pOut, const D3DXVECTOR2* pTexCoord,\n"
+        "                               const D3DXVECTOR2* pTexelSize, LPVOID pData) {\n"
+        "    (void)pTexCoord; (void)pTexelSize; (void)pData;\n"
+        "    *pOut = D3DXVECTOR4(1.0f, 0.0f, 1.0f, 1.0f);\n"
+        "}\n"
+        "\n"
+        "//-------------------------------------------------------------------------------------\n"
         "// InitScene\n"
         "//-------------------------------------------------------------------------------------\n"
         "HRESULT InitScene() {\n"
@@ -694,19 +706,14 @@ static const nx_tpl_file FILES_hello_world[] = {
         "        OutputDebugStringA(buf);\n"
         "        // Fallback: a solid magenta texture \342\200\224 the classic \"missing texture\"\n"
         "        // signal, so a build with no dirt.png in Content\\ is obvious on screen\n"
-        "        // instead of silently wrong. Guarded so a failed CreateTexture cannot\n"
-        "        // null-deref into LockRect, and Pitch-correct because a locked surface\n"
-        "        // is row-padded, not a tight width*4 buffer.\n"
+        "        // instead of silently wrong. Filled via D3DXFillTexture, which writes\n"
+        "        // through the Xbox 360's texture tiling correctly; a manual LockRect\n"
+        "        // fills the linear staging in the wrong order and the tiling leaks\n"
+        "        // through as coloured stripes. Guarded so a failed create is just an\n"
+        "        // untextured (not crashing) cube.\n"
         "        g_pTexture = NULL;\n"
         "        if (SUCCEEDED(g_pd3dDevice->CreateTexture(4, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_pTexture, NULL)) && g_pTexture) {\n"
-        "            D3DLOCKED_RECT lr;\n"
-        "            if (SUCCEEDED(g_pTexture->LockRect(0, &lr, NULL, 0))) {\n"
-        "                for (int y = 0; y < 4; y++) {\n"
-        "                    DWORD* row = (DWORD*)((BYTE*)lr.pBits + y * lr.Pitch);\n"
-        "                    for (int x = 0; x < 4; x++) row[x] = 0xFFFF00FF; // ARGB magenta\n"
-        "                }\n"
-        "                g_pTexture->UnlockRect(0);\n"
-        "            }\n"
+        "            D3DXFillTexture(g_pTexture, FillMagenta, NULL);\n"
         "        }\n"
         "    }\n"
         "\n"
