@@ -582,6 +582,85 @@ int nx_cmd_project(int argc, wchar_t **argv)
 
     if (!wcscmp(argv[0], L"create")) return cmd_create(argc - 1, argv + 1);
 
+    /*
+     * projectManager.open().
+     *
+     *   nexia-core project open <dir>
+     *
+     * `read` above answers with the handful of fields it knows how to name, which
+     * is enough to build with and not enough to open with: open() hands the whole
+     * config back to its caller, and Project Properties and the VS importer both
+     * store things in there that nexia-core has never heard of. Naming the fields
+     * would silently drop them. So the document goes back out whole.
+     */
+    if (!wcscmp(argv[0], L"open")) {
+        wchar_t cfg[NX_PATH];
+        nx_join(cfg, NX_PATH, argv[1], PROJECT_FILE);
+
+        if (GetFileAttributesW(cfg) == INVALID_FILE_ATTRIBUTES) {
+            wchar_t msg[NX_PATH * 2];
+            _snwprintf(msg, NX_PATH * 2 - 1, L"No %ls found in %ls", PROJECT_FILE, argv[1]);
+            msg[NX_PATH * 2 - 1] = 0;
+            printf("{\"ok\":false,\"error\":");
+            nx_json_str(stdout, msg);
+            printf("}\n");
+            return 1;
+        }
+
+        const char *err = NULL;
+        jv *root = jv_parse_file(cfg, &err);
+        if (!root) { nx_json_error(err ? err : "cannot read nexia.json"); return 1; }
+
+        /* config.path = projectDir. The path is where we found it, not what the
+         * file says — a project that has been moved still opens, which is why the
+         * six projects in the old Documents folder still work. */
+        jv_set_str(root, L"path", argv[1]);
+
+        printf("{\"ok\":true,\"project\":");
+        jv_write(stdout, root, 0);
+        printf("}\n");
+        jv_free(root);
+        return 0;
+    }
+
+    /*
+     * projectManager.save().
+     *
+     *   nexia-core project save <dir> <config.json>
+     *
+     * The config arrives as a file rather than as arguments because save
+     * serialises whatever it is handed: Project Properties and the VS importer
+     * both put fields in a project that nexia-core has never heard of, and a
+     * writer that only knew the fields it knew would drop them. So the document
+     * is read and written back whole, keys in the order they arrived.
+     *
+     * While TypeScript is still the caller this is a round trip — it has a
+     * JSON.stringify of its own. It earns its place when the config lives in a
+     * native UI instead, which is the point of moving this code at all. What it
+     * proves today is that the writer agrees with JSON.stringify byte for byte,
+     * which is what save() has to do to be swapped in at all.
+     */
+    if (!wcscmp(argv[0], L"save")) {
+        if (argc < 3) { nx_json_error("project save: expected <dir> <config.json>"); return 2; }
+
+        const char *err = NULL;
+        jv *cfg = jv_parse_file(argv[2], &err);
+        if (!cfg) { nx_json_error(err ? err : "cannot read the config"); return 2; }
+
+        wchar_t out[NX_PATH];
+        nx_join(out, NX_PATH, argv[1], PROJECT_FILE);
+        FILE *f = _wfopen(out, L"wb");
+        if (!f) { jv_free(cfg); nx_json_error("project save: cannot write nexia.json"); return 1; }
+        jv_write(f, cfg, 2);
+        fclose(f);
+        jv_free(cfg);
+
+        printf("{\"ok\":true,");
+        nx_json_field(stdout, "path", out);
+        printf("}\n");
+        return 0;
+    }
+
     /* Exists so nx_safe_name and nx_safe_filename can be proven against the
      * TypeScript before `project create` — the thing that needs them — is
      * written. Porting the foundation first and testing it later is how you end

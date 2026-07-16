@@ -10,9 +10,10 @@
  * WHAT IT DOES NOT SUPPORT, honestly:
  *   - Comments, trailing commas, single quotes. nexia.json is machine-written
  *     by projectManager.ts via JSON.stringify, so it is always strict JSON.
- *   - Numbers are parsed with wcstod and kept as double. nexia.json's only
- *     numbers are warningLevel (0-4) and the odd address, so precision beyond
- *     double is not a thing that can arise.
+ *   - Numbers are kept as double, which is what JavaScript has too, so nothing
+ *     is lost that JSON.parse would have kept. Parsed with strtod, deliberately
+ *     not wcstod: on this toolchain wcstod is not correctly rounded and disagrees
+ *     with V8 by one ulp on values like 8.087676e-10. See jp_number.
  *   - Duplicate keys: the first wins. JSON.stringify cannot emit them.
  *   - Nothing is ever freed. This is a one-shot CLI that parses one document
  *     and exits; an arena that dies with the process is the honest lifetime,
@@ -29,6 +30,7 @@
 
 #include <wchar.h>
 #include <stddef.h>
+#include <stdio.h>   /* FILE, for jv_write */
 
 typedef enum {
     JV_NULL = 0, JV_BOOL, JV_NUM, JV_STR, JV_ARR, JV_OBJ
@@ -84,5 +86,35 @@ const wchar_t *jv_get_str(const jv *obj, const wchar_t *key, const wchar_t *fall
  * afterwards. Copy what you need first.
  */
 void jv_free(jv *v);
+
+/*
+ * Write a tree back out exactly as JSON.stringify(value, null, indent) would.
+ *
+ * The reader existed because the build driver needed to read nexia.json. This
+ * exists because save() has to write one, and save() serialises whatever object
+ * it is handed — Project Properties and the VS importer both put fields in there
+ * that nexia-core has never heard of. A writer that only knew the fields in the
+ * template table would silently drop them, so this walks the tree instead: any
+ * document in, the same document out, keys in the order they were read.
+ *
+ * Byte-identical, not merely equivalent: the TypeScript still reads and rewrites
+ * this file, and two writers that disagree on bytes make every byte-level check
+ * downstream a false alarm.
+ *
+ * indent 0 emits the compact form (no spaces, no newlines), matching
+ * JSON.stringify(v) with no third argument.
+ *
+ * Numbers follow ECMA-262's Number::toString rather than anything %g-shaped:
+ * the shortest decimal that reads back as the same double, then placed by where
+ * the point falls — exponent form only outside 1e-6 .. 1e21, and no zero-padded
+ * exponent. Two %g-based attempts at this looked right and were not; see
+ * write_num, and jsonwrite-parity.js, which fuzzes it against JSON.stringify.
+ */
+void jv_write(FILE *f, const jv *v, int indent);
+
+/* Set obj.key to a string, replacing or appending. For open(), which overrides
+ * `path` with where the project was actually found while keeping every other
+ * field — including the ones nexia-core has never heard of. See json_parse.c. */
+void jv_set_str(jv *obj, const wchar_t *key, const wchar_t *val);
 
 #endif

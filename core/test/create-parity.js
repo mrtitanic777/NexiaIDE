@@ -148,10 +148,58 @@ function walk(dir, base = dir, out = []) {
         }
     }
 
+    /* ── open ──────────────────────────────────────────────────────────────
+     *
+     * open() hands its caller the whole config, so `project open` has to as well.
+     * `project read` names the fields it knows, which is enough to build with and
+     * not enough to open with: Project Properties and the VS importer both store
+     * things in a project that nexia-core has never heard of.
+     *
+     * The stale path is the point of the last field — open() overrides path with
+     * where the project was actually found, so a project that has been moved
+     * still opens. */
+    {
+        const dir = fs.mkdtempSync(path.join(TMP, 'open-'));
+        const cfg = {
+            name: 'P', path: 'C:\\WRONG\\STALE\\PATH', type: 'executable', template: 'empty',
+            sourceFiles: ['src/P.cpp'], defines: ['_XBOX'], warningLevel: 4, enableRtti: false,
+            solutionInfo: { guid: '{A1B2}', importedFrom: 'C:\\old\\P.vcxproj' },
+            weirdField: [1, 2, { deep: 'yes' }], nullish: null, frac: 0.1,
+        };
+        fs.writeFileSync(path.join(dir, 'nexia.json'), JSON.stringify(cfg, null, 2), 'utf-8');
+
+        checks++;
+        const ts = await new ProjectManager().open(dir);
+        let c;
+        try { c = JSON.parse(execFileSync(CORE, ['project', 'open', dir], { encoding: 'utf8' })).project; }
+        catch (e) { fail(`open: C threw: ${e.message}`); c = null; }
+
+        if (c) {
+            const a = JSON.stringify(ts), b = JSON.stringify(c);
+            if (a !== b) {
+                fail('open: the config differs');
+                console.log('      ts: ' + a);
+                console.log('      c:  ' + b);
+            } else {
+                console.log(`  open: whole config identical (unknown fields kept, stale path overridden)`);
+            }
+        }
+
+        checks++;
+        const missing = fs.mkdtempSync(path.join(TMP, 'nocfg-'));
+        let tsThrew = false;
+        try { await new ProjectManager().open(missing); } catch { tsThrew = true; }
+        let cOk = true;
+        try { execFileSync(CORE, ['project', 'open', missing], { encoding: 'utf8' }); }
+        catch (e) { cOk = false; }
+        if (tsThrew !== !cOk) fail(`open with no nexia.json: ts threw=${tsThrew}, C failed=${!cOk}`);
+        else console.log(`  open: both refuse a directory with no nexia.json`);
+    }
+
     console.log();
     console.log('  ================================================================');
     console.log(bad === 0
-        ? `  ALL ${checks} CREATE PARITY CHECKS PASS`
+        ? `  ALL ${checks} CREATE/OPEN PARITY CHECKS PASS`
         : `  *** ${bad} MISMATCH(ES) across ${checks} checks`);
     process.exit(bad ? 1 : 0);
 })().catch(e => { console.error('FAILED:', e.message, '\n', e.stack); process.exit(1); });
