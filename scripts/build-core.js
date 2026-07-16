@@ -67,7 +67,7 @@ const args = [
     '-municode', '-mconsole',
     ...sources, '-o', out,
     // ws2_32: devkit.c speaks XBDM over a socket.
-    '-ladvapi32', '-lshlwapi', '-lws2_32',
+    '-ladvapi32', '-lshlwapi', '-lws2_32', '-lwinhttp',
     // Static: this is spawned by an app that cannot assume any particular
     // MinGW runtime is installed on the user's machine.
     '-static', '-static-libgcc',

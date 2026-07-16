@@ -126,6 +126,7 @@ int wmain(int argc, wchar_t **argv)
     if (!wcscmp(argv[1], L"build"))   return nx_cmd_build(argc - 2, argv + 2);
     if (!wcscmp(argv[1], L"devkit"))  return nx_cmd_devkit(argc - 2, argv + 2);
     if (!wcscmp(argv[1], L"vsimport")) return nx_cmd_vsimport(argc - 2, argv + 2);
+    if (!wcscmp(argv[1], L"search")) return nx_cmd_search(argc - 2, argv + 2);
 
     nx_json_error("unknown command");
     return 2;
