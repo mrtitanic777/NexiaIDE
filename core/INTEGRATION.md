@@ -24,6 +24,7 @@ here is something that was run, not something that was reasoned about.
 | `extensions uninstall` | `uninstall()` | `extensions-parity.js` |
 | `extensions open` | `openExtensionsDir()` | one caller, ShellExecute either way |
 | `build parse` | `buildSystem.parseToolOutput()` | `buildsystem-parity.js` (115 checks) + a real failing build |
+| `build args` | `buildSystem.plan()` | `buildsystem-parity.js` (115 argv checks) + a real build, a real incremental skip and a real C2065 |
 | `devkit connect` | `devkit.connect()` | `devkit-hardware.js`, against a real Corona RGH |
 | `devkit volumes` | `devkit.getDrives()` | `devkit-hardware.js` |
 | `devkit sysinfo` | `devkit.getSystemInfo()` | `devkit-hardware.js` |
@@ -35,21 +36,35 @@ right line (7), the right message, and the build correctly failed.
 
 ## Not wired in
 
-**`build args`** — the only one left, and the reason is functional, not
-performance.
+Nothing. All 23 commands are called.
 
-nexia-core refuses a project with `projectReferences`, because resolving a
-reference means building the referenced project, which means spawning a
-compiler — deliberately not ported. The TypeScript supports them. No project on
-this machine uses one, but "no project I looked at uses it" is not "the feature
-does not exist", and swapping would silently drop it.
+## On the `build args` blockers that used to live here
 
-The port itself is sound: all 115 argv checks pass across Debug, Release,
-Profile and Release_LTCG, with PCH on and off and exceptions on and off. What
-blocks it is shape, not correctness — the C emits a whole build plan up front
-and `buildSystem.compile()` is called per source file. Wiring it means
-restructuring the build loop, and that is worth doing deliberately rather than
-as a footnote to a parser swap.
+This file said `build args` was blocked by two things. Neither survived being
+looked at properly, and both are recorded here because the reasoning was wrong
+in a way worth not repeating.
+
+**"nexia-core refuses `projectReferences`."** It does, and it should — resolving
+a reference means building it, which means spawning, which is not ported. But
+the TypeScript already builds references *before* any flag is computed, and
+folds each dependency's libraries and includes into a flattened project. The
+argv computation never sees a reference. So `plan()` hands nexia-core that
+flattened project with `projectReferences` dropped, and the C never has to
+resolve anything. The refusal is still there and still correct for anyone
+calling `build args` from a command line; it is simply unreachable from the IDE.
+The feature was never at risk.
+
+**"The C emits a whole plan while `compile()` runs per source file."** True, and
+irrelevant. The plan is a lookup table, not a script: each entry says what argv
+one source needs, and the per-file loop still decides which entries are stale
+enough to run. The loop did not need restructuring. What the swap actually
+deleted was the argv construction inside `compile()`, `link()` and `archive()` —
+not the loop around them.
+
+The pattern in both: a real constraint on the C *alone* was mistaken for a
+constraint on the C *called from TypeScript*. The line between them — TypeScript
+orchestrates and spawns, C computes — is the same line drawn everywhere else in
+this port, and it was already drawn here.
 
 ## On the performance argument that used to live here
 
@@ -74,6 +89,14 @@ If something is excluded from this file in future, the reason must be functional
 (as `build args` is), not a latency figure nobody can feel.
 
 ## A note on the tests
+
+Worse than a test that falsely accuses working code is a test that agrees with
+it for the wrong reason. When `build parse` was wired in, `buildsystem-parity.js`
+kept driving the live `runTool` — which by then called nexia-core. For one commit
+it compared `build parse` against `build parse`, printed "match" three times a
+run, and proved nothing. Both halves now drive the `_ts-backup` copy that still
+does the work in TypeScript, which is the only thing either half can honestly be
+compared against.
 
 Five separate times during this work a test reported a failure in code that was
 correct:

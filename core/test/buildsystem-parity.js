@@ -27,7 +27,68 @@ const { execFileSync, spawnSync } = require('child_process');
 const R = process.cwd();
 const { Toolchain } = require(path.join(R, 'dist/main/toolchain.js'));
 const { ProjectManager } = require(path.join(R, 'dist/main/projectManager.js'));
-const { BuildSystem } = require(path.join(R, 'dist/main/buildSystem.js'));
+
+/* ── the TypeScript under comparison ──────────────────────────────────────────
+ * NOT dist/main/buildSystem.js. That file no longer builds a command line — it
+ * asks nexia-core for one — so driving it here would compare the C against
+ * itself and pass no matter what either side did. The last TypeScript that
+ * really built the argv is src/main/_ts-backup/buildSystem-args.ts.bak, and
+ * that is what this compares against, exactly as xex-parity.js does with
+ * parseXex.ts.bak.
+ *
+ * Which means: delete the .bak and this test retires with it. That is the
+ * intended lifecycle — see _ts-backup/README.md — but it should be a decision,
+ * not an accident, so say so rather than passing silently. */
+const tsc = require(path.join(R, 'node_modules', 'typescript'));
+
+/** Transpile a .bak and pull its BuildSystem out, or null if it is gone. */
+function loadBak(name) {
+    const p = path.join(R, 'src', 'main', '_ts-backup', name);
+    if (!fs.existsSync(p)) return null;
+    const js = tsc.transpileModule(fs.readFileSync(p, 'utf8'), {
+        compilerOptions: { module: tsc.ModuleKind.CommonJS, target: tsc.ScriptTarget.ES2019 },
+    }).outputText;
+    // './toolchain' would otherwise resolve against this test's directory.
+    // Toolchain is only ever a type in these files so tsc most likely elides the
+    // import, but a shim costs nothing and stops that being load-bearing.
+    const req = (m) => m === './toolchain'
+        ? require(path.join(R, 'dist/main/toolchain.js'))
+        : require(m);
+    const box = { exports: {}, module: { exports: {} } };
+    // __dirname: the parser .bak doesn't need one, but a .bak that reaches for
+    // it should get the real main directory rather than a ReferenceError.
+    new Function('require', 'exports', 'module', '__dirname', js)
+        .call(box, req, box.exports, box.module, path.join(R, 'dist', 'main'));
+    const BS = box.exports.BuildSystem;
+    if (typeof BS !== 'function') {
+        console.error('   [X] could not load BuildSystem out of ' + name);
+        process.exit(1);
+    }
+    return BS;
+}
+
+/* ── the TypeScript under comparison ──────────────────────────────────────────
+ * NOT dist/main/buildSystem.js, for either half. That file no longer builds a
+ * command line and no longer parses tool output — it asks nexia-core for both —
+ * so driving it here compares the C against itself and passes no matter what
+ * either side does.
+ *
+ * That is not hypothetical. Between the commit that moved the parser into C and
+ * this one, the parser half below drove the live runTool and therefore compared
+ * `build parse` with `build parse`. It printed "match" three times a run and
+ * proved nothing.
+ *
+ * So each half drives the last TypeScript that really did the work:
+ *   argv   → buildSystem-args.ts.bak
+ *   parser → buildSystem-parser.ts.bak
+ * Delete either .bak and that half retires with it — the intended lifecycle
+ * (see _ts-backup/README.md), but said out loud rather than passing silently. */
+const BuildSystem = loadBak('buildSystem-args.ts.bak');
+const BuildSystemParser = loadBak('buildSystem-parser.ts.bak');
+if (!BuildSystem) {
+    console.log('  _ts-backup/buildSystem-args.ts.bak is gone - the argv parity check is retired.');
+    process.exit(0);
+}
 
 let bad = 0, checks = 0;
 const fail = (msg) => { bad++; console.log('  *** ' + msg); };
@@ -275,10 +336,15 @@ const CASES = [
     fs.writeFileSync(printer,
         `process.stdout.write(require('fs').readFileSync(${JSON.stringify(fixPath)}, 'utf-8'))`);
 
+    if (!BuildSystemParser) {
+        console.log('  _ts-backup/buildSystem-parser.ts.bak is gone - the parser parity check is retired.');
+        return;
+    }
+
     const tc2 = new Toolchain();
     await tc2.detect();
-    const bs2 = new BuildSystem(tc2);
-    const tsParsed = await BuildSystem.prototype.runTool.call(
+    const bs2 = new BuildSystemParser(tc2);
+    const tsParsed = await BuildSystemParser.prototype.runTool.call(
         bs2, process.execPath, [`"${printer}"`], '');
 
     const cParsed = core(['build', 'parse', fixPath]);

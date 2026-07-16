@@ -1017,6 +1017,13 @@ static int cmd_args(int argc, wchar_t **argv)
     nx_json_field(stdout, "outputDir", outDir);
     printf(",");
     nx_json_field(stdout, "compileTool", clPath);
+    printf(",");
+    /* The .pch itself, so the caller can delete a stale one before a /Yc.
+     * Null when no PCH source is present, which is not the same as the path
+     * being unused: the caller must not compute it, because that would be this
+     * file's naming rule living in two languages again. */
+    if (usePch) { nx_json_field(stdout, "pchFile", pchFile); }
+    else        { printf("\"pchFile\":null"); }
     printf(",\"compile\":[");
 
     args objs;
@@ -1046,7 +1053,12 @@ static int cmd_args(int argc, wchar_t **argv)
             nx_json_field(stdout, "source", files.v[i]);
             printf(",");
             nx_json_field(stdout, "obj", objPath);
-            printf(",\"args\":");
+            /* Which pass this entry belongs to, named rather than implied by
+             * position. The caller compiles the /Yc entry first and stops if it
+             * fails, and inferring that from index 0 would break the moment a
+             * project has no PCH at all. */
+            printf(",\"pch\":\"%ls\",\"args\":",
+                   pm == PCH_CREATE ? L"create" : pm == PCH_USE ? L"use" : L"none");
             print_args(&a);
             printf("}");
         }

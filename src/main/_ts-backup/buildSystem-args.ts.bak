@@ -21,32 +21,6 @@ import { BuildConfig, BuildResult, BuildMessage, ProjectConfig, BuildConfigurati
  * entry — a hand-made Nexia project, or one imported before this existed —
  * falls back to the flat fields, so nothing has to be migrated.
  */
-/** One source file's place in the plan: what to compile it to, and with what. */
-interface CompileEntry {
-    source: string;
-    obj: string;
-    /** Which pass. 'create' is the /Yc line and is always first. */
-    pch: 'create' | 'use' | 'none';
-    args: string[];
-}
-
-/** What `nexia-core build args` hands back for one configuration. */
-interface BuildPlan {
-    ok: true;
-    configuration: BuildConfiguration;
-    outputDir: string;
-    compileTool: string;
-    /** The .pch to create/use, or null when the project has no PCH source. */
-    pchFile: string | null;
-    compile: CompileEntry[];
-    /** Empty when the tool is missing from the SDK; one of the two is null. */
-    linkTool?: string;
-    archiveTool?: string;
-    output: string;
-    link: string[] | null;
-    archive: string[] | null;
-}
-
 function effectiveSettings(project: ProjectConfig, cfg: BuildConfiguration) {
     const o = project.configurations?.[cfg];
     return {
@@ -71,6 +45,28 @@ function effectiveSettings(project: ProjectConfig, cfg: BuildConfiguration) {
     };
 }
 
+/**
+ * Generate a unique .obj filename from a source path by incorporating the
+ * relative directory structure.  This prevents collisions when two source
+ * files share the same basename (e.g. src/Main.cpp and src/net/Main.cpp).
+ *
+ *   src/Main.cpp        →  Main.obj
+ *   src/net/Main.cpp    →  net_Main.obj
+ *   src/a/b/Util.cpp    →  a_b_Util.obj
+ */
+function uniqueObjName(srcPath: string, projectRoot: string): string {
+    const srcDir = path.join(projectRoot, 'src');
+    // Get path relative to src/ (or project root if not under src/)
+    let rel: string;
+    if (srcPath.startsWith(srcDir + path.sep) || srcPath.startsWith(srcDir + '/')) {
+        rel = path.relative(srcDir, srcPath);
+    } else {
+        rel = path.relative(projectRoot, srcPath);
+    }
+    // Replace directory separators with underscores, swap extension to .obj
+    const noExt = rel.replace(/\.[^.]+$/, '');
+    return noExt.replace(/[\\/]/g, '_') + '.obj';
+}
 
 export class BuildSystem {
     private toolchain: Toolchain;
@@ -223,41 +219,36 @@ export class BuildSystem {
             };
         }
 
-        // ── The plan ──
-        // Sources, object names, PCH and every command line, worked out once by
-        // nexia-core. What used to be here — the configured-list/directory-scan
-        // merge, the case-insensitive dedup, the .h → .cpp/.pch naming — is the
-        // same code in core/buildsystem.c, and having it in both languages was
-        // the last place a compiler flag could be fixed in one and stay broken
-        // in the other.
-        let plan: BuildPlan;
-        try {
-            plan = this.plan(project, configuration);
-        } catch (err: any) {
-            // Surfaced as a build error rather than thrown, because everything
-            // this can fail on — no SDK, no cl.exe, a project nexia-core
-            // refuses — is a thing the Output panel should say out loud.
-            const duration = Date.now() - startTime;
-            errors.push({ file: '', line: 0, column: 0, message: err.message, severity: 'error' });
-            this.emit(`1>\n1>  ERROR: ${err.message}\n1>\n`);
-            this.emitFailure(project, errors, warnings, duration, unsuccessfulMarker);
-            return { success: false, errors, warnings, output: fullOutput, duration };
-        }
+        // ── ClCompile ──
+        // Discover all source files: merge config list with directory scan
+        const configuredFiles = (project.sourceFiles || []).filter(f => /\.(cpp|c|cc|cxx)$/i.test(f));
+        const discoveredFiles = this.discoverSourceFiles(project.path);
 
+        // Deduplicate source files — use case-insensitive comparison on Windows
+        // because NTFS treats "main.cpp" and "Main.cpp" as the same file.
+        const seenPaths = new Set<string>();
+        const sourceFiles: string[] = [];
+        const addSource = (filePath: string) => {
+            const key = process.platform === 'win32' ? filePath.toLowerCase() : filePath;
+            if (!seenPaths.has(key)) {
+                seenPaths.add(key);
+                sourceFiles.push(filePath);
+            }
+        };
+        for (const f of configuredFiles) {
+            const abs = path.isAbsolute(f) ? f : path.join(project.path, f);
+            addSource(abs);
+        }
+        for (const f of discoveredFiles) addSource(f);
         const objFiles: string[] = [];
-        const pchEntry = plan.compile.find(e => e.pch === 'create');
-        const nonPchEntries = plan.compile.filter(e => e.pch !== 'create');
-        const usePch = !!pchEntry;
-        // Named by the plan, not recomputed: this file's .h → .pch rule lives in
-        // core/buildsystem.c now, and a second copy here would be the same bug
-        // waiting to happen.
-        const pchPath = plan.pchFile;
-        // Not the plan's business: this names the *header* to stat for staleness,
-        // not anything that reaches a command line. The default matches
-        // core/buildsystem.c's, which is a duplicated literal and nothing more —
-        // if it ever grows a rule, the rule belongs in the C and the plan should
-        // carry the answer back.
+
+        // Determine PCH files
         const pchHeaderName = project.pchHeader || 'stdafx.h';
+        const pchCppName = pchHeaderName.replace(/\.h$/i, '.cpp');
+        const pchPath = path.join(buildConfig.outputDir, pchHeaderName.replace(/\.h$/i, '.pch'));
+        const pchCpp = sourceFiles.find(f => path.basename(f).toLowerCase() === pchCppName.toLowerCase());
+        const nonPchFiles = sourceFiles.filter(f => path.basename(f).toLowerCase() !== pchCppName.toLowerCase());
+        const usePch = !!pchCpp;
 
         // ── Incremental build tracking ──
         let pchRebuilt = false;
@@ -271,7 +262,7 @@ export class BuildSystem {
         // newer than its .obj — a conservative full-recompile on header change.
         const newestHeaderMtime = this.newestHeaderMtime(project);
 
-        if (plan.compile.length > 0) {
+        if (sourceFiles.length > 0) {
             this.emit(`1>ClCompile:\n`);
 
             // Check if a source file needs recompilation by comparing mtimes.
@@ -294,10 +285,10 @@ export class BuildSystem {
             };
 
             // Step 1: Compile PCH source first with /Yc (create precompiled header)
-            if (usePch && pchEntry && pchPath) {
-                const pchCpp = pchEntry.source;
+            if (usePch && pchCpp) {
                 const baseName = path.basename(pchCpp);
-                const objPath = pchEntry.obj;
+                const objName = uniqueObjName(pchCpp, project.path);
+                const objPath = path.join(buildConfig.outputDir, objName);
 
                 // Check if PCH needs rebuilding: pch source or pch header changed
                 let pchNeedsRebuild = !fs.existsSync(pchPath) || !fs.existsSync(objPath);
@@ -328,7 +319,9 @@ export class BuildSystem {
 
                     this.emit(`1>  ${baseName}\n`);
 
-                    const result = await this.compileEntry(pchEntry, plan);
+                    const result = await this.compile(pchCpp, objPath, project, buildConfig, {
+                        pchMode: 'create', pchHeader: pchHeaderName, pchFile: pchPath
+                    });
                     fullOutput += result.output;
 
                     if (result.rawLines.length > 0) {
@@ -357,10 +350,10 @@ export class BuildSystem {
 
             // Step 2: Compile remaining source files with /Yu (use precompiled header)
 
-            for (const entry of nonPchEntries) {
-                const srcPath = entry.source;
+            for (const srcPath of nonPchFiles) {
                 const baseName = path.basename(srcPath);
-                const objPath = entry.obj;
+                const objName = uniqueObjName(srcPath, project.path);
+                const objPath = path.join(buildConfig.outputDir, objName);
 
                 if (!needsCompile(srcPath, objPath)) {
                     // Up to date — skip compilation but include obj for linking
@@ -376,7 +369,8 @@ export class BuildSystem {
 
                 this.emit(`1>  ${baseName}\n`);
 
-                const result = await this.compileEntry(entry, plan);
+                const pchOpts = usePch ? { pchMode: 'use' as const, pchHeader: pchHeaderName, pchFile: pchPath } : undefined;
+                const result = await this.compile(srcPath, objPath, project, buildConfig, pchOpts);
                 fullOutput += result.output;
 
                 if (result.rawLines.length > 0) {
@@ -411,17 +405,15 @@ export class BuildSystem {
         if (objFiles.length > 0) {
             if (project.type === 'library') {
                 // ── Static Library: use lib.exe to create .lib archive ──
-                // The name and the path are the plan's, not rebuilt from
-                // project.name here — same reason as the .obj names.
-                const libPath = plan.output;
-                const libName = path.basename(libPath);
+                const libName = project.name + '.lib';
+                const libPath = path.join(buildConfig.outputDir, libName);
                 const needsLib = compiledCount > 0 || pchRebuilt || !fs.existsSync(libPath);
 
                 if (needsLib) {
                     this.emit(`1>Lib:\n`);
                     this.emit(`1>  ${libName}\n`);
 
-                    const libResult = await this.archiveWithPlan(plan);
+                    const libResult = await this.archive(objFiles, libPath, project);
                     fullOutput += libResult.output;
                     errors.push(...libResult.errors);
                     warnings.push(...libResult.warnings);
@@ -442,8 +434,9 @@ export class BuildSystem {
                 }
             } else {
                 // ── Executable or DLL: use link.exe ──
-                const exePath = plan.output;
-                const exeName = path.basename(exePath);
+                const outputExt = project.type === 'dll' ? '.dll' : '.exe';
+                const exeName = project.name + outputExt;
+                const exePath = path.join(buildConfig.outputDir, exeName);
 
                 // Skip link if nothing was recompiled and the output already exists
                 const needsLink = compiledCount > 0 || pchRebuilt || !fs.existsSync(exePath);
@@ -452,7 +445,7 @@ export class BuildSystem {
                     this.emit(`1>Link:\n`);
                     this.emit(`1>  ${exeName}\n`);
 
-                    const linkResult = await this.linkWithPlan(plan);
+                    const linkResult = await this.link(objFiles, exePath, project, buildConfig);
                     fullOutput += linkResult.output;
                     errors.push(...linkResult.errors);
                     warnings.push(...linkResult.warnings);
@@ -565,89 +558,314 @@ export class BuildSystem {
     /**
      * Compile a single source file.
      */
-    /**
-     * The whole build plan for one configuration, from nexia-core.
-     *
-     * The flags ARE the product — one wrong /MTd links the debug CRT into a
-     * Release title, and neither that nor a missing d3d9i.lib shows up as a
-     * crash on the PC. They were written twice, in two languages, and now they
-     * are written once.
-     *
-     * What comes back is a lookup table, not a script. `compile` says what argv
-     * each source needs; the loop in runBuild still decides which of them are
-     * stale enough to actually run. That is why "the C emits a whole plan while
-     * compile() runs per file" never needed the loop restructured.
-     *
-     * The project is written back out rather than passed by its path on disk,
-     * because by this point it is no longer what is on disk: buildReferences
-     * has folded each dependency's libraries and includes into it.
-     * projectReferences is dropped for the same reason — nexia-core refuses a
-     * project that has one, since resolving a reference means building it, and
-     * they are already built and merged by the time we get here. The C never
-     * has to spawn a compiler, which is the whole point of the split.
-     */
-    private plan(project: ProjectConfig, configuration: BuildConfiguration): BuildPlan {
-        const effective = { ...project, projectReferences: undefined };
-        const tmp = path.join(os.tmpdir(), `nexia-plan-${process.pid}-${Date.now()}.json`);
-        try {
-            fs.writeFileSync(tmp, JSON.stringify(effective), 'utf-8');
-            const core = path.join(__dirname, '..', 'nexia-core.exe');
-
-            // nexia-core exits non-zero when it refuses, and the reason is the
-            // JSON on stdout — so the throw is where the answer arrives, not
-            // where it is lost.
-            let out: string;
-            try {
-                out = execFileSync(core, ['build', 'args', tmp, configuration],
-                    { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
-            } catch (err: any) {
-                out = err?.stdout?.toString() || '';
-                if (!out) throw err;
-            }
-
-            const p = JSON.parse(out);
-            if (!p.ok) throw new Error(p.error || 'nexia-core refused the project');
-            return p as BuildPlan;
-        } finally {
-            try { fs.unlinkSync(tmp); } catch {}
-        }
-    }
-
-    private async compileEntry(
-        entry: CompileEntry,
-        plan: BuildPlan
+    private async compile(
+        srcPath: string,
+        objPath: string,
+        project: ProjectConfig,
+        config: BuildConfig,
+        pchOpts?: { pchMode: 'create' | 'use'; pchHeader: string; pchFile: string }
     ): Promise<{ output: string; errors: BuildMessage[]; warnings: BuildMessage[]; rawLines: string[] }> {
-        return this.runTool(plan.compileTool, entry.args, entry.source);
+        const sdkPaths = this.toolchain.getPaths();
+        if (!sdkPaths) {
+            return { output: '', errors: [{ file: srcPath, line: 0, column: 0, message: 'Xbox 360 SDK not configured. Go to Settings > SDK Setup.', severity: 'error' }], warnings: [], rawLines: ['error: Xbox 360 SDK not configured'] };
+        }
+
+        const clPath = this.toolchain.getToolPath('cl.exe');
+        if (!clPath) {
+            return { output: '', errors: [{ file: srcPath, line: 0, column: 0, message: 'cl.exe not found in SDK', severity: 'error' }], warnings: [], rawLines: ['error: cl.exe not found in SDK bin directory'] };
+        }
+
+        const args: string[] = ['/nologo', '/c', `/Fo"${objPath}"`];
+
+        // Precompiled header flags
+        if (pchOpts) {
+            if (pchOpts.pchMode === 'create') {
+                // /Yc creates the .pch from this source file
+                args.push(`/Yc"${pchOpts.pchHeader}"`);
+            } else {
+                // /Yu uses an existing .pch
+                args.push(`/Yu"${pchOpts.pchHeader}"`);
+            }
+            args.push(`/Fp"${pchOpts.pchFile}"`);
+        }
+
+        // Include paths — Xbox-specific headers MUST come first to avoid
+        // picking up internal CRT headers from Source\crt\
+        const xboxInc = path.join(sdkPaths.include, 'xbox');
+        if (fs.existsSync(xboxInc)) args.push(`/I"${xboxInc}"`);
+        args.push(`/I"${sdkPaths.include}"`);
+
+        // MSVC CRT headers (excpt.h, stdarg.h, etc.) — needed by xtl.h
+        // Check multiple possible locations for the Visual C++ headers
+        const vcIncludeCandidates = [
+            path.join(sdkPaths.root, 'vc', 'include'),
+            path.join(sdkPaths.root, 'include', 'msvc'),
+            path.join(sdkPaths.root, 'msvc', 'include'),
+            // TechPreview compiler headers — contains public excpt.h, crtdefs.h,
+            // vadefs.h without the internal CRT #error guard that Source\crt has.
+            // This is the primary fallback for machines without VS installed.
+            path.join(sdkPaths.root, 'TechPreview', 'Jul12Compiler', 'include', 'xbox'),
+            // Standard MSVC 2010 install
+            'C:\\Program Files (x86)\\Microsoft Visual Studio 10.0\\VC\\include',
+            'C:\\Program Files\\Microsoft Visual Studio 10.0\\VC\\include',
+            // MSVC 2008
+            'C:\\Program Files (x86)\\Microsoft Visual Studio 9.0\\VC\\include',
+            'C:\\Program Files\\Microsoft Visual Studio 9.0\\VC\\include',
+        ];
+        for (const vcInc of vcIncludeCandidates) {
+            if (fs.existsSync(vcInc) && fs.existsSync(path.join(vcInc, 'excpt.h'))) {
+                args.push(`/I"${vcInc}"`);
+                break;
+            }
+        }
+        // Project source dir
+        args.push(`/I"${path.join(project.path, 'src')}"`);
+        args.push(`/I"${project.path}"`);
+        for (const inc of effectiveSettings(project, config.configuration).includeDirectories) {
+            const incPath = path.isAbsolute(inc) ? inc : path.join(project.path, inc);
+            args.push(`/I"${incPath}"`);
+        }
+
+        // Configuration-specific flags
+        if (config.configuration === 'Debug') {
+            args.push('/Od', '/Zi', `/Fd"${path.join(config.outputDir, 'vc100.pdb')}"`, '/D_DEBUG', '/DDEBUG', '/RTC1', '/GS');
+        } else if (config.configuration === 'Release') {
+            args.push('/O2', '/Ox', '/DNDEBUG', '/GS-');
+        } else if (config.configuration === 'Profile') {
+            args.push('/O2', '/Zi', `/Fd"${path.join(config.outputDir, 'vc100.pdb')}"`, '/DNDEBUG', '/DPROFILE', '/GS-');
+        } else if (config.configuration === 'Release_LTCG') {
+            // Link-Time Code Generation: /GL defers codegen to the linker so it can
+            // optimise across translation units. It pairs with /LTCG on the link
+            // step — /GL objects are not real object files and a plain link fails.
+            args.push('/O2', '/Ox', '/DNDEBUG', '/DLTCG', '/GS-', '/GL');
+        }
+
+        // C runtime — must match the configuration's _DEBUG setting.
+        //
+        // Without this, cl.exe defaults to /MT (release CRT) while a Debug build
+        // defines _DEBUG. The CRT/STL headers then emit debug-only assertion
+        // calls — _CrtDbgReportW from std::vector::operator[], vcompd.lib and
+        // friends — which live only in the debug CRT, and the link fails with a
+        // single baffling unresolved external.
+        //
+        // Defaults match Visual Studio's Xbox 360 defaults: MultiThreadedDebug
+        // for Debug, MultiThreaded otherwise.
+        const crt = effectiveSettings(project, config.configuration).runtimeLibrary
+            ?? (config.configuration === 'Debug' ? 'MTd' : 'MT');
+        args.push(`/${crt}`);
+
+        // Xbox 360 specific defines
+        args.push('/D_XBOX', '/DXBOX', '/D_XBOX_VER=200');
+
+        // User defines
+        for (const def of config.defines) args.push(`/D${def}`);
+
+        // Standard flags — driven by Project Properties
+        // Exception handling
+        const eh = project.exceptionHandling ?? 'sync';
+        if (eh === 'sync') args.push('/EHsc');
+        else if (eh === 'async') args.push('/EHa');
+        // 'none' = omit /EH entirely
+
+        // Warning level
+        const wl = project.warningLevel ?? 3;
+        args.push(`/W${wl}`);
+
+        // Treat warnings as errors
+        if (project.treatWarningsAsErrors) args.push('/WX');
+
+        // RTTI
+        if (project.enableRtti) args.push('/GR');
+        else args.push('/GR-');
+
+        // Optimization override (if set, overrides configuration defaults)
+        if (project.optimizationOverride && project.optimizationOverride !== 'default') {
+            // Remove any existing /O flags that were added by configuration block above
+            const oIdx = args.findIndex(a => a.startsWith('/O') || a === '/Od');
+            if (oIdx !== -1) args.splice(oIdx, 1);
+            // Also remove /Ox if present
+            const oxIdx = args.findIndex(a => a === '/Ox');
+            if (oxIdx !== -1) args.splice(oxIdx, 1);
+
+            switch (project.optimizationOverride) {
+                case 'disabled': args.push('/Od'); break;
+                case 'minSize': args.push('/O1'); break;
+                case 'maxSpeed': args.push('/O2'); break;
+                case 'full': args.push('/Ox'); break;
+            }
+        }
+
+        // Additional compiler flags from Project Properties
+        if (project.additionalCompilerFlags) {
+            const extra = project.additionalCompilerFlags.trim().split(/\s+/).filter(f => f);
+            args.push(...extra);
+        }
+
+        // Additional compiler flags from BuildConfig (runtime overrides)
+        args.push(...config.compilerFlags);
+
+        // Source file
+        args.push(`"${srcPath}"`);
+
+        return this.runTool(clPath, args, srcPath);
     }
 
     /**
-     * Link, via a response file.
-     *
-     * The argv is the plan's; turning a long one into link.rsp stays here,
-     * because it is about how a process gets spawned rather than what the
-     * command line says. link.exe supports @file natively, as MSBuild uses.
+     * Link object files into an executable.
      */
-    private async linkWithPlan(plan: BuildPlan):
-        Promise<{ output: string; errors: BuildMessage[]; warnings: BuildMessage[]; rawLines: string[] }> {
-        if (!plan.linkTool) {
+    private async link(
+        objFiles: string[],
+        outputPath: string,
+        project: ProjectConfig,
+        config: BuildConfig
+    ): Promise<{ output: string; errors: BuildMessage[]; warnings: BuildMessage[]; rawLines: string[] }> {
+        const sdkPaths = this.toolchain.getPaths();
+        if (!sdkPaths) {
+            return { output: '', errors: [{ file: '', line: 0, column: 0, message: 'SDK not configured', severity: 'error' }], warnings: [], rawLines: [] };
+        }
+
+        const linkPath = this.toolchain.getToolPath('link.exe');
+        if (!linkPath) {
             return { output: '', errors: [{ file: '', line: 0, column: 0, message: 'link.exe not found', severity: 'error' }], warnings: [], rawLines: ['error: link.exe not found in SDK'] };
         }
-        const rspPath = path.join(plan.outputDir, 'link.rsp');
-        fs.writeFileSync(rspPath, (plan.link || []).join('\n'), 'utf-8');
-        return this.runTool(plan.linkTool, [`@"${rspPath}"`], '');
-    }
 
-    /** Archive a static library. As linkWithPlan, but lib.exe. */
-    private async archiveWithPlan(plan: BuildPlan):
-        Promise<{ output: string; errors: BuildMessage[]; warnings: BuildMessage[]; rawLines: string[] }> {
-        if (!plan.archiveTool) {
-            return { output: '', errors: [{ file: '', line: 0, column: 0, message: 'lib.exe not found', severity: 'error' }], warnings: [], rawLines: ['error: lib.exe not found in SDK'] };
+        const args: string[] = ['/nologo', `/OUT:"${outputPath}"`];
+
+        if (project.type === 'dll') args.push('/DLL');
+
+        // Xbox 360 link.exe infers MACHINE/SUBSYSTEM/ENTRY automatically
+
+        // Library paths
+        const xboxLib = path.join(sdkPaths.lib, 'xbox');
+        if (fs.existsSync(xboxLib)) args.push(`/LIBPATH:"${xboxLib}"`);
+        for (const libDir of effectiveSettings(project, config.configuration).libraryDirectories) {
+            const libPath = path.isAbsolute(libDir) ? libDir : path.join(project.path, libDir);
+            args.push(`/LIBPATH:"${libPath}"`);
         }
-        const rspPath = path.join(plan.outputDir, 'lib.rsp');
-        fs.writeFileSync(rspPath, (plan.archive || []).join('\n'), 'utf-8');
-        return this.runTool(plan.archiveTool, [`@"${rspPath}"`], '');
+
+        // Default Xbox 360 libraries.
+        //
+        // The XDK ships FOUR flavours of most libs, not two, and the suffix is
+        // per-configuration — taken from what VS2010 puts in AdditionalDependencies:
+        //
+        //   Debug         d3d9d.lib      xact3d.lib      xmcored.lib     (+xbdm)
+        //   Profile       d3d9i.lib      xact3i.lib      xmcorei.lib     (+xbdm)  "i" = instrumented
+        //   Release       d3d9.lib       xact3.lib       xmcore.lib
+        //   Release_LTCG  d3d9ltcg.lib   xact3ltcg.lib   xmcoreltcg.lib
+        //
+        // This used to be `isDebug ? 'd3d9d.lib' : 'd3d9.lib'`, which meant Profile
+        // silently linked the Release libs rather than the instrumented ones, and
+        // Release_LTCG had no libs of its own at all.
+        const cfg = config.configuration;
+        const LIBS: Record<string, string[]> = {
+            Debug: [
+                'xapilibd.lib', 'xboxkrnl.lib',
+                'd3d9d.lib', 'd3dx9d.lib', 'xgraphicsd.lib',
+                'xaudiod2.lib', 'xactd3.lib', 'x3daudiod.lib',
+                'xmcored.lib', 'xnetd.lib', 'xinput2d.lib', 'vcompd.lib',
+                'xbdm.lib',
+            ],
+            Profile: [
+                'xapilibi.lib', 'xboxkrnl.lib',
+                'd3d9i.lib', 'd3dx9.lib', 'xgraphics.lib',
+                'xaudio2.lib', 'xact3i.lib', 'x3daudioi.lib',
+                'xmcorei.lib', 'xnet.lib', 'xinput2.lib', 'vcomp.lib',
+                'xbdm.lib',
+            ],
+            Release: [
+                'xapilib.lib', 'xboxkrnl.lib',
+                'd3d9.lib', 'd3dx9.lib', 'xgraphics.lib',
+                'xaudio2.lib', 'xact3.lib', 'x3daudio.lib',
+                'xmcore.lib', 'xnet.lib', 'xinput2.lib', 'vcomp.lib',
+            ],
+            Release_LTCG: [
+                'xapilib.lib', 'xboxkrnl.lib',
+                'd3d9ltcg.lib', 'd3dx9.lib', 'xgraphics.lib',
+                'xaudio2.lib', 'xact3ltcg.lib', 'x3daudioltcg.lib',
+                'xmcoreltcg.lib', 'xnet.lib', 'xinput2.lib', 'vcomp.lib',
+            ],
+        };
+        args.push(...(LIBS[cfg] || LIBS.Release));
+
+        // SDK headers auto-link xapilib.lib via #pragma comment(lib). Suppress it
+        // wherever we link a different flavour, or both end up on the command line
+        // and the linker reports duplicate symbols.
+        if (cfg === 'Debug') args.push('/NODEFAULTLIB:xapilib.lib');
+        else if (cfg === 'Profile') args.push('/NODEFAULTLIB:xapilib.lib');
+
+        // User libraries — this configuration's, not whichever set was imported.
+        for (const lib of effectiveSettings(project, config.configuration).libraries) args.push(lib);
+
+        // Link-time code generation — must match the /GL used when compiling.
+        // /LTCG is incompatible with /INCREMENTAL, so it goes before the debug
+        // block and Release_LTCG deliberately takes neither.
+        if (config.configuration === 'Release_LTCG') {
+            args.push('/LTCG');
+        }
+
+        // Debug info
+        if (config.configuration === 'Debug' || config.configuration === 'Profile') {
+            args.push('/INCREMENTAL');
+            args.push('/DEBUG');
+            const pdbPath = outputPath.replace(/\.(exe|dll)$/i, '.pdb');
+            args.push(`/PDB:"${pdbPath}"`);
+        }
+
+        // Additional linker flags from Project Properties
+        if (project.additionalLinkerFlags) {
+            const extra = project.additionalLinkerFlags.trim().split(/\s+/).filter(f => f);
+            args.push(...extra);
+        }
+
+        // Additional linker flags from BuildConfig (runtime overrides)
+        args.push(...config.linkerFlags);
+
+        // Object files
+        for (const obj of objFiles) args.push(`"${obj}"`);
+
+        // Xbox 360 link.exe: skip XEX generation (done separately by buildXex)
+        args.push('/XEX:NO');
+
+        // Use a response file to avoid "The command line is too long" errors.
+        // Large projects (100+ .obj files) easily exceed the Windows command
+        // line limit of ~8191 chars (cmd.exe) or 32768 chars (CreateProcess).
+        // link.exe natively supports @responsefile syntax, just like MSBuild uses.
+        const rspPath = path.join(config.outputDir, 'link.rsp');
+        fs.writeFileSync(rspPath, args.join('\n'), 'utf-8');
+
+        return this.runTool(linkPath, [`@"${rspPath}"`], '');
     }
 
+    /**
+     * Create a static library (.lib) from object files using lib.exe.
+     */
+    private async archive(
+        objFiles: string[],
+        outputPath: string,
+        project: ProjectConfig
+    ): Promise<{ output: string; errors: BuildMessage[]; warnings: BuildMessage[]; rawLines: string[] }> {
+        const libExe = this.toolchain.getToolPath('lib.exe');
+        if (!libExe) {
+            return { output: '', errors: [{ file: '', line: 0, column: 0, message: 'lib.exe not found in SDK', severity: 'error' }], warnings: [], rawLines: ['error: lib.exe not found in SDK'] };
+        }
+
+        const args: string[] = ['/nologo', `/OUT:"${outputPath}"`];
+
+        // Additional linker/lib flags from Project Properties
+        if (project.additionalLinkerFlags) {
+            const extra = project.additionalLinkerFlags.trim().split(/\s+/).filter(f => f);
+            args.push(...extra);
+        }
+
+        // Object files
+        for (const obj of objFiles) args.push(`"${obj}"`);
+
+        // Use a response file for large projects
+        const rspPath = path.join(path.dirname(outputPath), 'lib.rsp');
+        fs.writeFileSync(rspPath, args.join('\n'), 'utf-8');
+
+        return this.runTool(libExe, [`@"${rspPath}"`], '');
+    }
 
     /**
      * Build every project this one references, and report what to link.
@@ -1031,6 +1249,36 @@ export class BuildSystem {
         return newest;
     }
 
+    /**
+     * Scan project directory for source files.
+     */
+    private discoverSourceFiles(projectPath: string): string[] {
+        const sources: string[] = [];
+        const srcDir = path.join(projectPath, 'src');
+        const scanDir = (dir: string) => {
+            if (!fs.existsSync(dir)) return;
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                if (entry.isDirectory()) {
+                    if (!['out', 'obj', '.git', 'node_modules'].includes(entry.name)) {
+                        scanDir(path.join(dir, entry.name));
+                    }
+                } else if (/\.(cpp|c|cc|cxx)$/i.test(entry.name)) {
+                    sources.push(path.join(dir, entry.name));
+                }
+            }
+        };
+        // Scan src/ folder first, then root
+        scanDir(srcDir);
+        // Also check root for any loose source files
+        if (fs.existsSync(projectPath)) {
+            for (const entry of fs.readdirSync(projectPath, { withFileTypes: true })) {
+                if (!entry.isDirectory() && /\.(cpp|c|cc|cxx)$/i.test(entry.name)) {
+                    sources.push(path.join(projectPath, entry.name));
+                }
+            }
+        }
+        return sources;
+    }
 
     /**
      * Run a tool and parse output for errors/warnings.
