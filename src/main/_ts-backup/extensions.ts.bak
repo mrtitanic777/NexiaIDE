@@ -5,7 +5,6 @@
  */
 
 import * as fs from 'fs';
-import { execFileSync } from 'child_process';
 import * as path from 'path';
 import * as os from 'os';
 import { spawn } from 'child_process';
@@ -35,23 +34,6 @@ interface ExtensionsState {
     extensions: { [id: string]: { enabled: boolean; installedAt: string } };
 }
 
-
-/**
- * nexia-core.exe — the filesystem half of extension management.
- *
- * Manifests stay here. A hand-rolled reader in C would have to agree with
- * JSON.parse about escapes and duplicate keys on files the IDE did not author,
- * and the first manifest it read differently would install under the wrong id.
- * TypeScript parses; C moves the bytes.
- */
-function corePath(): string {
-    return path.join(__dirname, '..', 'nexia-core.exe');
-}
-
-function core(args: string[]): any {
-    const out = execFileSync(corePath(), args, { encoding: 'utf8', windowsHide: true });
-    return JSON.parse(out);
-}
 export class ExtensionManager {
     private extensionsDir: string;
     private stateFile: string;
@@ -212,13 +194,9 @@ export class ExtensionManager {
      * Uninstall an extension by ID.
      */
     uninstall(extensionId: string): boolean {
-        // nexia-core removes the directory; the state file stays here, because
-        // it is JSON and this side owns JSON.
-        try {
-            core(['extensions', 'uninstall', extensionId]);
-        } catch (err: any) {
-            this.emit(`Couldn't remove ${extensionId}: ${err.message}\n`);
-            return false;
+        const extDir = path.join(this.extensionsDir, extensionId);
+        if (fs.existsSync(extDir)) {
+            fs.rmSync(extDir, { recursive: true, force: true });
         }
         delete this.state.extensions[extensionId];
         this.saveState();
@@ -254,8 +232,8 @@ export class ExtensionManager {
      * Open the extensions directory in the system file explorer.
      */
     openExtensionsDir() {
-        // nexia-core opens it. Same ShellExecute either way; one caller.
-        try { core(['extensions', 'open']); } catch {}
+        const cmd = process.platform === 'win32' ? 'explorer' : 'open';
+        spawn(cmd, [this.extensionsDir], { detached: true, stdio: 'ignore' }).unref();
     }
 
     /**

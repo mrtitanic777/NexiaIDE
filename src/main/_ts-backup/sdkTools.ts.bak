@@ -3,7 +3,7 @@
  * Provides access to shader compilation, audio encoding, XUI, and other SDK tools.
  */
 
-import { spawn, execFileSync } from 'child_process';
+import { spawn } from 'child_process';
 import * as path from 'path';
 import { Toolchain } from './toolchain';
 
@@ -65,44 +65,38 @@ export class SdkTools {
     /**
      * Run any SDK tool with arguments.
      */
-    /**
-     * Run any SDK tool with arguments.
-     *
-     * nexia-core does the spawn. It builds PATH, XEDK, INCLUDE and LIB itself
-     * and passes the command line to CreateProcess unshelled — where this used
-     * shell:true and hand-quoted the path, which is how
-     * "C:Program Files (x86)..." becomes a bug: cmd.exe re-parses the line
-     * and the parentheses are its own syntax.
-     *
-     * Output arrives once, at the end, rather than streaming. Every caller here
-     * is a one-shot tool — fxc, xma2encode, xexdump — that prints a few lines and
-     * exits, so nothing was watching it arrive. The build driver streams because
-     * a build is long; these are not.
-     */
     runTool(toolName: string, args: string[]): Promise<string> {
         return new Promise((resolve, reject) => {
-            this.emit(`> ${toolName} ${args.join(' ')}\n`);
-            try {
-                const core = path.join(__dirname, '..', 'nexia-core.exe');
-                const out = execFileSync(core, ['tool', 'run', toolName, ...args],
-                    { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
-                const res = JSON.parse(out);
-                if (res.output) this.emit(res.output);
-                if (res.ok) resolve(res.output || '');
-                else reject(new Error(res.output || res.error || `${toolName} failed`));
-            } catch (err: any) {
-                // nexia-core exits non-zero when the tool does, and execFileSync
-                // throws on that — the JSON on stdout is still the answer.
-                if (err.stdout) {
-                    try {
-                        const res = JSON.parse(err.stdout);
-                        if (res.output) this.emit(res.output);
-                        reject(new Error(res.output || res.error || `${toolName} failed`));
-                        return;
-                    } catch {}
-                }
-                reject(err);
+            const toolPath = this.toolchain.getToolPath(toolName);
+            if (!toolPath) {
+                reject(new Error(`${toolName} not found in SDK`));
+                return;
             }
+
+            const env = this.toolchain.getToolEnvironment();
+            const toolDir = path.dirname(toolPath);
+            this.emit(`> ${toolName} ${args.join(' ')}\n`);
+
+            const proc = spawn(toolPath.includes(' ') ? `"${toolPath}"` : toolPath, args, { env, cwd: toolDir, shell: true, windowsHide: true });
+            let output = '';
+
+            proc.stdout.on('data', (data) => {
+                const text = data.toString();
+                output += text;
+                this.emit(text);
+            });
+
+            proc.stderr.on('data', (data) => {
+                const text = data.toString();
+                output += text;
+                this.emit(text);
+            });
+
+            proc.on('close', (code) => {
+                code === 0 ? resolve(output) : reject(new Error(output));
+            });
+
+            proc.on('error', reject);
         });
     }
 
