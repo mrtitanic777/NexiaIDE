@@ -24,7 +24,16 @@ if (!fs.existsSync(CORE)) {
     process.exit(1);
 }
 
-const src = fs.readFileSync(path.join(R, 'src', 'main', 'vsImporter.ts'), 'utf8');
+// _ts-backup/vsImporter.ts.bak, not the live module: the live parseSolution /
+// parseVsProject / resolveProjectReference now spawn nexia-core, so lifting them
+// would compare the C against itself. The .bak holds the original TypeScript
+// implementation. Delete it and this test retires — see _ts-backup/README.md.
+const BAK = path.join(R, 'src', 'main', '_ts-backup', 'vsImporter.ts.bak');
+if (!fs.existsSync(BAK)) {
+    console.log('  _ts-backup/vsImporter.ts.bak is gone - nothing left to compare against.');
+    process.exit(0);
+}
+const src = fs.readFileSync(BAK, 'utf8');
 const tsc = require(path.join(R, 'node_modules', 'typescript'));
 
 /*

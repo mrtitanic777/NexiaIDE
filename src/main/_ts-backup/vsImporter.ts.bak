@@ -17,31 +17,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { execFileSync } from 'child_process';
 import { ProjectConfig, BuildConfiguration, ConfigurationSettings, SolutionInfo, SolutionProject } from '../shared/types';
-
-/**
- * Run a nexia-core `vsimport` command and return its parsed JSON.
- *
- * The parsing that reads a .sln, a .vcxproj/.vcproj and a project reference is
- * core/vsimport.c now, proven field for field by vsimport-parity.js. This is the
- * one spawn the three exported functions share. A refusal comes back as
- * {ok:false,error} on stdout with a non-zero exit, so the answer is on the thrown
- * error's stdout; a truly broken spawn has none and rethrows.
- */
-function core(args: string[]): any {
-    const exe = path.join(__dirname, '..', 'nexia-core.exe');
-    let out: string;
-    try {
-        out = execFileSync(exe, args, { encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
-    } catch (err: any) {
-        out = err?.stdout?.toString() || '';
-        if (!out) throw err;
-    }
-    const res = JSON.parse(out);
-    if (!res.ok) throw new Error(res.error || 'nexia-core refused the request');
-    return res;
-}
 
 // ══════════════════════════════════════
 //  TYPES
@@ -245,11 +221,25 @@ const HEADER_RE = /\.(h|hpp|hxx|inl)$/i;
  * Solution files are plain text; each project is one `Project("{...}") = ...` line.
  */
 export function parseSolution(slnPath: string): VsSolutionInfo {
-    // core/vsimport.c scans the .sln, skips solution folders and non-C++
-    // projects, and resolves each path against the .sln's directory. Proven by
-    // vsimport-parity.js.
-    const res = core(['vsimport', 'solution', slnPath]);
-    return { solutionPath: res.solutionPath, name: res.name, projects: res.projects };
+    const raw = fs.readFileSync(slnPath, 'utf-8');
+    const dir = path.dirname(slnPath);
+    const projects: VsProjectRef[] = [];
+
+    const re = /^Project\("\{[^}]+\}"\)\s*=\s*"([^"]+)",\s*"([^"]+)"/gm;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(raw)) !== null) {
+        const name = m[1].trim();
+        const rel = m[2].trim();
+        if (!/\.(vcxproj|vcproj)$/i.test(rel)) continue; // skip solution folders / C# / etc.
+        const abs = path.resolve(dir, toHostPath(rel));
+        projects.push({ name, path: abs, exists: fs.existsSync(abs) });
+    }
+
+    return {
+        solutionPath: slnPath,
+        name: path.basename(slnPath, path.extname(slnPath)),
+        projects,
+    };
 }
 
 // ══════════════════════════════════════
@@ -285,13 +275,49 @@ function condProp(xml: string, tag: string, configuration: string): string | nul
  * which for Debug resolves to <SDK>\Source\Samples\Common\Debug\AtgFramework.lib.
  */
 function resolveProjectReference(refPath: string, configuration: string, sdkRoot?: string): VsProjectReference {
-    // The macro expansion ($(ProjectDir)/$(Configuration)/$(ProjectName)/
-    // $(OutDir)) and the on-disk .lib check are core/vsimport.c's, proven by the
-    // ATG-framework case in vsimport-parity.js. Still called per (ref, cfg) by
-    // buildSolutionInfo for the Explorer's per-configuration libPaths.
-    const args = ['vsimport', 'resolveref', refPath, configuration];
-    if (sdkRoot) args.push('--sdk', sdkRoot);
-    return core(args).reference as VsProjectReference;
+    const fileName = path.basename(refPath, path.extname(refPath));
+    const insideSdk = !!sdkRoot &&
+        path.resolve(refPath).toLowerCase().startsWith(path.resolve(sdkRoot).toLowerCase() + path.sep);
+
+    if (!fs.existsSync(refPath)) {
+        return { path: refPath, name: fileName, exists: false, isStaticLibrary: false, insideSdk };
+    }
+
+    let xml = '';
+    try { xml = fs.readFileSync(refPath, 'utf-8'); } catch {
+        return { path: refPath, name: fileName, exists: false, isStaticLibrary: false, insideSdk };
+    }
+
+    const name = tagText(xml, 'ProjectName') || fileName;
+    const cfgType = condProp(xml, 'ConfigurationType', configuration) || '';
+    const isStaticLibrary = /StaticLibrary/i.test(cfgType);
+    if (!isStaticLibrary) {
+        return { path: refPath, name, exists: true, isStaticLibrary: false, insideSdk };
+    }
+
+    const projectDir = path.dirname(refPath) + path.sep;
+    const expand = (v: string) => v
+        .replace(/\$\(ProjectDir\)/gi, projectDir)
+        .replace(/\$\(Configuration\)/gi, configuration)
+        .replace(/\$\(ProjectName\)/gi, name);
+
+    // OutDir may be relative to the project (the ATG project uses a bare
+    // "Profile\" for some configurations), so resolve it against projectDir.
+    const rawOutDir = condProp(xml, 'OutDir', configuration) || `$(ProjectDir)$(Configuration)\\`;
+    const outDir = path.resolve(projectDir, expand(rawOutDir));
+
+    const rawOutFile = condProp(xml, 'OutputFile', configuration) || `$(OutDir)$(ProjectName).lib`;
+    const outFile = expand(rawOutFile).replace(/\$\(OutDir\)/gi, outDir + path.sep);
+    const libPath = path.resolve(projectDir, outFile);
+
+    return {
+        path: refPath,
+        name,
+        exists: true,
+        isStaticLibrary: true,
+        libPath: fs.existsSync(libPath) ? libPath : undefined,
+        insideSdk,
+    };
 }
 
 /** Parse <ProjectReference Include="..."> items out of a .vcxproj. */
@@ -363,16 +389,8 @@ function parseConfigGroup(groups: string[], configuration: string): Configuratio
  *                copied into the user's project.
  */
 export function parseVsProject(projPath: string, sdkRoot?: string): ParsedVsProject {
-    // Both formats are core/vsimport.c now — item classification, the
-    // per-configuration ItemDefinitionGroups, and the project-reference
-    // resolution — proven structurally by vsimport-parity.js across five layers.
     const ext = path.extname(projPath).toLowerCase();
-    const args = ext === '.vcproj'
-        ? ['vsimport', 'vcproj', projPath]
-        : ['vsimport', 'vcxproj', projPath, ...(sdkRoot ? ['--sdk', sdkRoot] : [])];
-    const res = core(args);
-    delete res.ok;
-    return res as ParsedVsProject;
+    return ext === '.vcproj' ? parseVcproj(projPath) : parseVcxproj(projPath, sdkRoot);
 }
 
 /** VS2010+ MSBuild format. */

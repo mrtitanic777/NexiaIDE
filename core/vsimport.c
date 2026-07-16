@@ -1339,6 +1339,20 @@ int nx_cmd_vsimport(int argc, wchar_t **argv)
         return parse_vcxproj(argv[1], sdk);
     }
 
+    /* one referenced project resolved for one configuration — what
+     * buildSolutionInfo needs per (ref, cfg) to fill the Explorer's libPaths. */
+    if (!wcscmp(argv[0], L"resolveref")) {
+        if (argc < 3) { nx_json_error("vsimport resolveref: expected <refPath> <configuration> [--sdk <root>]"); return 2; }
+        const wchar_t *sdk = NULL;
+        for (int i = 3; i + 1 < argc; i += 2) if (!wcscmp(argv[i], L"--sdk")) sdk = argv[i + 1];
+        vs_ref r;
+        resolve_project_reference(argv[1], argv[2], sdk, &r);
+        printf("{\"ok\":true,\"reference\":");
+        emit_ref(stdout, &r);
+        printf("}\n");
+        return 0;
+    }
+
     nx_json_error("vsimport: unknown subcommand");
     return 2;
 }
