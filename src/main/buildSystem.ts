@@ -515,6 +515,34 @@ export class BuildSystem {
             }
         }
 
+        // ── Content ──
+        // Copy the project's Content\ folder next to the XEX, so a runtime
+        // game:\Content\... locator resolves. The Minecraft demo loads
+        // game:\Content\dirt.png this way; without this the file is never beside
+        // the XEX and the texture load always fails to the procedural fallback.
+        //
+        // Executables and DLLs only (a .lib has no runtime), and not gated on
+        // whether the link ran: a texture can change with no source edit, so an
+        // up-to-date build must still refresh the deployed content.
+        if ((project.type === 'executable' || project.type === 'dll') && errors.length === 0) {
+            const contentDir = path.join(project.path, 'Content');
+            try {
+                if (fs.existsSync(contentDir) && fs.statSync(contentDir).isDirectory()) {
+                    const dest = path.join(buildConfig.outputDir, 'Content');
+                    const copied = this.copyDirRecursive(contentDir, dest);
+                    if (copied > 0) {
+                        this.emit(`1>Content:\n`);
+                        this.emit(`1>  ${copied} file${copied > 1 ? 's' : ''} copied to ${path.relative(project.path, dest)}\\\n`);
+                    }
+                }
+            } catch (e: any) {
+                // A content-copy failure is a warning, not a build failure: the
+                // XEX built fine, the texture just won't be there.
+                warnings.push({ file: '', line: 0, column: 0, message: `Could not copy Content\\: ${e.message}`, severity: 'warning' });
+                this.emit(`1>  WARNING: could not copy Content\\: ${e.message}\n`);
+            }
+        }
+
         // ── FinalizeBuildStatus ──
         const duration = Date.now() - startTime;
         const success = errors.length === 0;
@@ -782,6 +810,23 @@ export class BuildSystem {
      * /O rather than /A: append leaves entries from previous builds in the
      * archive, so a renamed scene would ship alongside its own ghost.
      */
+    /**
+     * Copy a directory tree, returning how many files landed. Used to deploy the
+     * project's Content\ folder beside the XEX. Overwrites — a build should
+     * refresh the deployed content, not merge with a stale copy.
+     */
+    private copyDirRecursive(src: string, dest: string): number {
+        let count = 0;
+        fs.mkdirSync(dest, { recursive: true });
+        for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+            const s = path.join(src, entry.name);
+            const d = path.join(dest, entry.name);
+            if (entry.isDirectory()) count += this.copyDirRecursive(s, d);
+            else { fs.copyFileSync(s, d); count++; }
+        }
+        return count;
+    }
+
     private async buildXuiContent(
         project: ProjectConfig,
         buildConfig: BuildConfig
