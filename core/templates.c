@@ -4,7 +4,7 @@
  *     npx tsc && node scripts/gen-templates.js
  *
  * The project template table, from projectManager.ts's getTemplates().
- * 6 templates, 22 files, 38506 bytes of content.
+ * 6 templates, 22 files, 39214 bytes of content.
  *
  * Proven byte-for-byte against the TypeScript by core/test/templates-parity.js.
  */
@@ -598,15 +598,26 @@ static const nx_tpl_file FILES_hello_world[] = {
         "}\n"
         "\n"
         "//-------------------------------------------------------------------------------------\n"
-        "// Missing-texture fill: solid magenta, per texel. Used with D3DXFillTexture so\n"
-        "// the Xbox 360's tiled/swizzled texture memory is written correctly \342\200\224 a manual\n"
-        "// LockRect fills the linear staging in the wrong order and the tiling shows\n"
-        "// through as coloured stripes. The output is RGBA: (1,0,1,1) = magenta.\n"
+        "// Missing-texture fill: a magenta face with a black border, per texel. Magenta\n"
+        "// is the classic \"texture missing\" signal; the black border frames every face so\n"
+        "// the cube's edges read as solid black bars where faces meet, instead of a flat\n"
+        "// magenta blob with no visible structure.\n"
+        "//\n"
+        "// Used with D3DXFillTexture so the Xbox 360's tiled/swizzled texture memory is\n"
+        "// written correctly \342\200\224 a manual LockRect fills the linear staging in the wrong\n"
+        "// order and the tiling shows through as coloured stripes. pTexCoord is the 0..1\n"
+        "// position across the face; output is RGBA.\n"
         "//-------------------------------------------------------------------------------------\n"
-        "static VOID WINAPI FillMagenta(D3DXVECTOR4* pOut, const D3DXVECTOR2* pTexCoord,\n"
-        "                               const D3DXVECTOR2* pTexelSize, LPVOID pData) {\n"
-        "    (void)pTexCoord; (void)pTexelSize; (void)pData;\n"
-        "    *pOut = D3DXVECTOR4(1.0f, 0.0f, 1.0f, 1.0f);\n"
+        "static VOID WINAPI FillFallbackTexture(D3DXVECTOR4* pOut, const D3DXVECTOR2* pTexCoord,\n"
+        "                                       const D3DXVECTOR2* pTexelSize, LPVOID pData) {\n"
+        "    (void)pTexelSize; (void)pData;\n"
+        "    const float border = 0.10f; // black frame width, as a fraction of the face\n"
+        "    if (pTexCoord->x < border || pTexCoord->x > 1.0f - border ||\n"
+        "        pTexCoord->y < border || pTexCoord->y > 1.0f - border) {\n"
+        "        *pOut = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 1.0f); // black edge bar\n"
+        "    } else {\n"
+        "        *pOut = D3DXVECTOR4(1.0f, 0.0f, 1.0f, 1.0f); // magenta face\n"
+        "    }\n"
         "}\n"
         "\n"
         "//-------------------------------------------------------------------------------------\n"
@@ -711,9 +722,11 @@ static const nx_tpl_file FILES_hello_world[] = {
         "        // fills the linear staging in the wrong order and the tiling leaks\n"
         "        // through as coloured stripes. Guarded so a failed create is just an\n"
         "        // untextured (not crashing) cube.\n"
+        "        // 64x64 (not 4x4) so the black border is a clean thin frame rather than\n"
+        "        // a quarter of the face.\n"
         "        g_pTexture = NULL;\n"
-        "        if (SUCCEEDED(g_pd3dDevice->CreateTexture(4, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_pTexture, NULL)) && g_pTexture) {\n"
-        "            D3DXFillTexture(g_pTexture, FillMagenta, NULL);\n"
+        "        if (SUCCEEDED(g_pd3dDevice->CreateTexture(64, 64, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_pTexture, NULL)) && g_pTexture) {\n"
+        "            D3DXFillTexture(g_pTexture, FillFallbackTexture, NULL);\n"
         "        }\n"
         "    }\n"
         "\n"

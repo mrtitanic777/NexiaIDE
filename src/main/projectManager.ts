@@ -609,15 +609,26 @@ HRESULT InitD3D()
 }
 
 //-------------------------------------------------------------------------------------
-// Missing-texture fill: solid magenta, per texel. Used with D3DXFillTexture so
-// the Xbox 360's tiled/swizzled texture memory is written correctly — a manual
-// LockRect fills the linear staging in the wrong order and the tiling shows
-// through as coloured stripes. The output is RGBA: (1,0,1,1) = magenta.
+// Missing-texture fill: a magenta face with a black border, per texel. Magenta
+// is the classic "texture missing" signal; the black border frames every face so
+// the cube's edges read as solid black bars where faces meet, instead of a flat
+// magenta blob with no visible structure.
+//
+// Used with D3DXFillTexture so the Xbox 360's tiled/swizzled texture memory is
+// written correctly — a manual LockRect fills the linear staging in the wrong
+// order and the tiling shows through as coloured stripes. pTexCoord is the 0..1
+// position across the face; output is RGBA.
 //-------------------------------------------------------------------------------------
-static VOID WINAPI FillMagenta(D3DXVECTOR4* pOut, const D3DXVECTOR2* pTexCoord,
-                               const D3DXVECTOR2* pTexelSize, LPVOID pData) {
-    (void)pTexCoord; (void)pTexelSize; (void)pData;
-    *pOut = D3DXVECTOR4(1.0f, 0.0f, 1.0f, 1.0f);
+static VOID WINAPI FillFallbackTexture(D3DXVECTOR4* pOut, const D3DXVECTOR2* pTexCoord,
+                                       const D3DXVECTOR2* pTexelSize, LPVOID pData) {
+    (void)pTexelSize; (void)pData;
+    const float border = 0.10f; // black frame width, as a fraction of the face
+    if (pTexCoord->x < border || pTexCoord->x > 1.0f - border ||
+        pTexCoord->y < border || pTexCoord->y > 1.0f - border) {
+        *pOut = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 1.0f); // black edge bar
+    } else {
+        *pOut = D3DXVECTOR4(1.0f, 0.0f, 1.0f, 1.0f); // magenta face
+    }
 }
 
 //-------------------------------------------------------------------------------------
@@ -722,9 +733,11 @@ HRESULT InitScene() {
         // fills the linear staging in the wrong order and the tiling leaks
         // through as coloured stripes. Guarded so a failed create is just an
         // untextured (not crashing) cube.
+        // 64x64 (not 4x4) so the black border is a clean thin frame rather than
+        // a quarter of the face.
         g_pTexture = NULL;
-        if (SUCCEEDED(g_pd3dDevice->CreateTexture(4, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_pTexture, NULL)) && g_pTexture) {
-            D3DXFillTexture(g_pTexture, FillMagenta, NULL);
+        if (SUCCEEDED(g_pd3dDevice->CreateTexture(64, 64, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_pTexture, NULL)) && g_pTexture) {
+            D3DXFillTexture(g_pTexture, FillFallbackTexture, NULL);
         }
     }
 
