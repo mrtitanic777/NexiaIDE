@@ -66,6 +66,28 @@ int          nx_tool_path(const nx_sdk *sdk, const wchar_t *tool, wchar_t *out, 
 int          nx_bin_dirs(const nx_sdk *sdk, wchar_t dirs[3][NX_PATH]);
 int          nx_missing_runtime(const nx_sdk *sdk, const wchar_t **missing, int cap);
 
+/*
+ * The environment an SDK tool must be spawned with: PATH, XEDK, INCLUDE, LIB.
+ *
+ * Returns a CreateProcess environment block — a run of NUL-terminated
+ * KEY=VALUE strings ending in a second NUL. Caller frees with nx_env_free.
+ * Returns NULL on failure.
+ */
+wchar_t     *nx_tool_env(const nx_sdk *sdk);
+void         nx_env_free(wchar_t *block);
+
+/* ── run.c ── */
+/*
+ * Spawn a tool with the SDK environment and collect its output.
+ *
+ * `out` receives everything the tool wrote to stdout and stderr, interleaved as
+ * the console would show it; caller frees. Returns the exit code, or -1 if the
+ * process could not be started.
+ */
+int nx_run(const wchar_t *exe, const wchar_t *args, const wchar_t *cwd,
+           const nx_sdk *sdk, char **out);
+int nx_cmd_tool(int argc, wchar_t **argv);
+
 /* ── util.c ── */
 int  nx_exists(const wchar_t *path);
 int  nx_is_dir(const wchar_t *path);

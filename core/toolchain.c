@@ -204,6 +204,127 @@ int nx_tool_path(const nx_sdk *sdk, const wchar_t *tool, wchar_t *out, size_t ca
     return 0;
 }
 
+/* Append "KEY=VALUE\0" to a growing environment block. */
+static void env_add(wchar_t **blk, size_t *len, size_t *cap, const wchar_t *key, const wchar_t *val)
+{
+    size_t need = wcslen(key) + 1 + wcslen(val) + 1;
+    if (*len + need + 1 > *cap) {
+        size_t grow = (*cap ? *cap * 2 : 4096);
+        while (grow < *len + need + 1) grow *= 2;
+        wchar_t *n = (wchar_t *)realloc(*blk, grow * sizeof(wchar_t));
+        if (!n) return;
+        *blk = n; *cap = grow;
+    }
+    *len += (size_t)_snwprintf(*blk + *len, need, L"%ls=%ls", key, val) + 1;
+}
+
+/* Read a variable from our own environment, or "" if unset. */
+static void env_get(const wchar_t *key, wchar_t *out, size_t cap)
+{
+    DWORD n = GetEnvironmentVariableW(key, out, (DWORD)cap);
+    if (n == 0 || n >= cap) out[0] = 0;
+}
+
+/*
+ * Build the environment an SDK tool needs.
+ *
+ * Mirrors getToolEnvironment() in toolchain.ts, including its two defensive
+ * fallbacks: a packaged app can lose ComSpec and SystemRoot, and a child that
+ * inherits an environment without them fails to start with an error that names
+ * neither.
+ */
+wchar_t *nx_tool_env(const nx_sdk *sdk)
+{
+    wchar_t *blk = NULL;
+    size_t len = 0, cap = 0;
+
+    /* Inherit everything we have, minus the four we are about to override —
+     * a stale INCLUDE or LIB from the parent would otherwise win by being
+     * first, and cl.exe takes the first match. */
+    wchar_t *ours = GetEnvironmentStringsW();
+    if (ours) {
+        for (wchar_t *p = ours; *p; p += wcslen(p) + 1) {
+            if (!_wcsnicmp(p, L"PATH=", 5) || !_wcsnicmp(p, L"XEDK=", 5) ||
+                !_wcsnicmp(p, L"INCLUDE=", 8) || !_wcsnicmp(p, L"LIB=", 4)) continue;
+            size_t n = wcslen(p);
+            if (len + n + 2 > cap) {
+                size_t grow = (cap ? cap * 2 : 8192);
+                while (grow < len + n + 2) grow *= 2;
+                wchar_t *g = (wchar_t *)realloc(blk, grow * sizeof(wchar_t));
+                if (!g) { FreeEnvironmentStringsW(ours); free(blk); return NULL; }
+                blk = g; cap = grow;
+            }
+            wcscpy(blk + len, p);
+            len += n + 1;
+        }
+        FreeEnvironmentStringsW(ours);
+    }
+
+    wchar_t old_path[8192], old_inc[8192], old_lib[8192], sysroot[NX_PATH], comspec[NX_PATH];
+    env_get(L"PATH", old_path, 8192);
+    env_get(L"INCLUDE", old_inc, 8192);
+    env_get(L"LIB", old_lib, 8192);
+    env_get(L"SystemRoot", sysroot, NX_PATH);
+    env_get(L"ComSpec", comspec, NX_PATH);
+
+    if (!*sysroot) {
+        nx_copy(sysroot, NX_PATH, L"C:\\WINDOWS");
+        env_add(&blk, &len, &cap, L"SystemRoot", sysroot);
+    }
+    if (!*comspec) {
+        wchar_t sys32[NX_PATH], cs[NX_PATH];
+        nx_join(sys32, NX_PATH, sysroot, L"system32");
+        nx_join(cs, NX_PATH, sys32, L"cmd.exe");
+        env_add(&blk, &len, &cap, L"ComSpec", cs);
+    }
+
+    /* PATH: the SDK's bin directories first. */
+    wchar_t dirs[3][NX_PATH];
+    int nd = nx_bin_dirs(sdk, dirs);
+    wchar_t *path = (wchar_t *)malloc((8192 + 3 * NX_PATH) * sizeof(wchar_t));
+    if (!path) { free(blk); return NULL; }
+    path[0] = 0;
+    for (int i = 0; i < nd; i++) { wcscat(path, dirs[i]); wcscat(path, L";"); }
+    wcscat(path, old_path);
+    env_add(&blk, &len, &cap, L"PATH", path);
+    free(path);
+
+    env_add(&blk, &len, &cap, L"XEDK", sdk->root);
+
+    /* INCLUDE: include\xbox must precede include, or cl.exe finds the CRT's
+     * internal headers under Source\crt first and the build fails in ways that
+     * point nowhere near the cause. */
+    wchar_t xbox_inc[NX_PATH];
+    nx_join(xbox_inc, NX_PATH, sdk->include, L"xbox");
+    wchar_t *inc = (wchar_t *)malloc((8192 + 2 * NX_PATH) * sizeof(wchar_t));
+    if (!inc) { free(blk); return NULL; }
+    inc[0] = 0;
+    if (nx_exists(xbox_inc)) { wcscat(inc, xbox_inc); wcscat(inc, L";"); }
+    wcscat(inc, sdk->include); wcscat(inc, L";"); wcscat(inc, old_inc);
+    env_add(&blk, &len, &cap, L"INCLUDE", inc);
+    free(inc);
+
+    wchar_t xbox_lib[NX_PATH];
+    nx_join(xbox_lib, NX_PATH, sdk->lib, L"xbox");
+    wchar_t *lib = (wchar_t *)malloc((8192 + NX_PATH) * sizeof(wchar_t));
+    if (!lib) { free(blk); return NULL; }
+    _snwprintf(lib, 8192 + NX_PATH - 1, L"%ls;%ls", xbox_lib, old_lib);
+    lib[8192 + NX_PATH - 1] = 0;
+    env_add(&blk, &len, &cap, L"LIB", lib);
+    free(lib);
+
+    /* The block ends with a second NUL. */
+    if (len + 1 > cap) {
+        wchar_t *g = (wchar_t *)realloc(blk, (len + 1) * sizeof(wchar_t));
+        if (!g) { free(blk); return NULL; }
+        blk = g;
+    }
+    blk[len] = 0;
+    return blk;
+}
+
+void nx_env_free(wchar_t *block) { free(block); }
+
 /*
  * The SDK's tools are MSVC 2010 era and will not start without the 2010 CRT.
  * Missing DLLs produce a dialog from the loader, not an error we can catch, so
