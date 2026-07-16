@@ -12,7 +12,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { ChildProcess, spawn, execSync, execFileSync } from 'child_process';
+import { ChildProcess, spawn, execSync } from 'child_process';
 
 export interface EmulatorRegisters {
     gpr: { name: string; value: string }[];
@@ -200,18 +200,19 @@ export class EmulatorManager {
      * Find all PIDs matching an executable name using tasklist.
      */
     private findPidsByName(exeName: string): number[] {
-        // nexia-core walks the process list with Toolhelp32. What was here ran
-        // tasklist and pulled the pid out of its CSV with a regex — a process
-        // spawn either way, but one of them parses a localised, formatted table
-        // that exists to be read by people. The column order is not a contract.
         try {
-            const core = path.join(__dirname, '..', 'nexia-core.exe');
-            const res = JSON.parse(execFileSync(core, ['emulator', 'pids', exeName],
-                { encoding: 'utf8', windowsHide: true, timeout: 5000 }));
-            return res.pids || [];
+            const output = execSync(
+                `tasklist /FI "IMAGENAME eq ${exeName}" /FO CSV /NH`,
+                { windowsHide: true, encoding: 'utf8', timeout: 5000 }
+            );
+            const pids: number[] = [];
+            for (const line of output.split('\n')) {
+                // CSV format: "Nexia360.exe","12345","Console","1","50,000 K"
+                const match = line.match(/"[^"]*","(\d+)"/);
+                if (match) pids.push(parseInt(match[1]));
+            }
+            return pids;
         } catch {
-            // Same as before: a lookup that fails is an emulator that is not
-            // running, which every caller already handles.
             return [];
         }
     }
@@ -402,33 +403,44 @@ export class EmulatorManager {
 
         this.emit('[GDB] Interrupting...\n');
 
-        // nexia-core calls DebugBreakProcess. What was here wrote a .ps1 to
-        // TEMP that had PowerShell compile a C# class at runtime to P/Invoke
-        // three kernel32 functions, ran it, and deleted it — to make one API
-        // call. It also checked nothing: OpenProcess could return NULL and
-        // DebugBreakProcess could fail, and the catch below only fired if
-        // PowerShell itself died. A silent failure then fell straight into
-        // waitForStop and spent five seconds waiting for a stop nobody had
-        // asked for.
-        //
-        // The C reports what actually happened, so the fallback is taken on
-        // purpose rather than by timeout.
-        let broke = false;
+        // On Windows, the only reliable way to interrupt a debugged process
+        // is calling DebugBreakProcess via the Windows API.
         try {
-            const core = path.join(__dirname, '..', 'nexia-core.exe');
-            const res = JSON.parse(execFileSync(core, ['emulator', 'break', String(this.targetPid)],
-                { encoding: 'utf8', windowsHide: true, timeout: 5000 }));
-            broke = !!res.broke;
-            if (!broke) this.emit(`[GDB] DebugBreakProcess failed (error ${res.code}).\n`);
+            const scriptPath = path.join(os.tmpdir(), `nexia_dbgbreak_${this.targetPid}.ps1`);
+            const script = `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class K32 {
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr OpenProcess(int a, bool b, int c);
+    [DllImport("kernel32.dll")]
+    public static extern bool DebugBreakProcess(IntPtr h);
+    [DllImport("kernel32.dll")]
+    public static extern bool CloseHandle(IntPtr h);
+}
+"@
+$h = [K32]::OpenProcess(0x1F0FFF, $false, ${this.targetPid})
+[K32]::DebugBreakProcess($h)
+[K32]::CloseHandle($h)
+`;
+            fs.writeFileSync(scriptPath, script, 'utf8');
+            try {
+                execSync(`powershell -NoProfile -ExecutionPolicy Bypass -File "${scriptPath}"`, {
+                    windowsHide: true,
+                    timeout: 5000,
+                });
+            } finally {
+                // Always remove the temp script, even if execSync threw (timeout
+                // / ExecutionPolicy), otherwise nexia_dbgbreak_*.ps1 accumulate.
+                try { fs.unlinkSync(scriptPath); } catch {}
+            }
         } catch (err: any) {
-            this.emit(`[GDB] Couldn't run nexia-core to interrupt: ${err.message}\n`);
-        }
-
-        if (!broke) {
-            // GDB can sometimes stop it even when DebugBreakProcess cannot.
-            this.emit('[GDB] Falling back to -exec-interrupt.\n');
+            this.emit(`[GDB] DebugBreakProcess failed: ${err.message}\n`);
+            // Fallback to MI command
             this.gdbSend('-exec-interrupt --all');
         }
+
         const paused = await this.waitForStop(5000);
 
         if (!paused) {

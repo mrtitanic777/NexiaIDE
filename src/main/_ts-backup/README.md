@@ -15,3 +15,7 @@ Delete a file here once its C counterpart has survived a release.
 |---|---|---|
 | `toolchain.ts.bak` | `core/toolchain.c` | `core/test/toolchain-parity.js`, `env-parity.js` |
 | `parseXex.ts.bak` | `core/xex.c` | `core/test/xex-parity.js` — which compares against this file, so deleting it retires the test |
+| `emulator.ts.bak` | `core/emulator.c` (break + pids only) | `core/test/emulator-parity.js` |
+
+Note `emulator.ts.bak` is a whole-file copy: only two functions were replaced,
+and the rest of that file — the GDB/MI session — is still live TypeScript.
