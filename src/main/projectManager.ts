@@ -3,6 +3,7 @@
  * Handles project creation from templates, loading, and saving.
  */
 
+import { logCore } from './coreLog';
 import { execFileSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -1232,13 +1233,16 @@ int MyLib_DoWork(const char* input, char* output, int outputSize)
      */
     private core(args: string[]): any {
         const exe = path.join(__dirname, '..', 'nexia-core.exe');
+        const t0 = Date.now();
         let out: string;
         try {
             out = execFileSync(exe, args, { encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
         } catch (err: any) {
             out = err?.stdout?.toString() || '';
+            logCore(args, t0, err);
             if (!out) throw err;
         }
+        logCore(args, t0, undefined, out);
         const res = JSON.parse(out);
         if (!res.ok) throw new Error(res.error || 'nexia-core refused the request');
         return res;

@@ -1153,6 +1153,12 @@ function menuAction(id: string, fn: () => void) {
 
 menuAction('menu-new-project', () => showNewProjectDialog());
 menuAction('menu-open-project', () => openProject());
+menuAction('menu-close-project', () => {
+    // Same path as the Explorer's Close Project button: save session, close
+    // tabs, clear state, and drop back to the welcome screen's New/Open choices.
+    if (currentProject) closeCurrentProject();
+    else { $('welcome-screen').style.display = 'flex'; appendOutput('No project is open.\n'); }
+});
 menuAction('menu-new-file', () => { if (currentProject) inlineCreateItem('file'); else showNewFileDialog(); });
 menuAction('menu-save', () => saveCurrentFile());
 menuAction('menu-save-all', () => saveAllFiles());

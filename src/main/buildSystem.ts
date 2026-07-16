@@ -4,6 +4,7 @@
  * Output format mirrors Visual Studio / MSBuild for Xbox 360.
  */
 
+import { logCore } from './coreLog';
 import * as os from 'os';
 import { execFileSync } from 'child_process';
 import * as path from 'path';
@@ -597,13 +598,16 @@ export class BuildSystem {
             // JSON on stdout — so the throw is where the answer arrives, not
             // where it is lost.
             let out: string;
+            const t0 = Date.now();
             try {
                 out = execFileSync(core, ['build', 'args', tmp, configuration],
                     { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
             } catch (err: any) {
                 out = err?.stdout?.toString() || '';
+                logCore(['build', 'args', configuration], t0, err);
                 if (!out) throw err;
             }
+            logCore(['build', 'args', configuration], t0, undefined, out);
 
             const p = JSON.parse(out);
             if (!p.ok) throw new Error(p.error || 'nexia-core refused the project');
@@ -1067,11 +1071,14 @@ export class BuildSystem {
         { output: string; errors: BuildMessage[]; warnings: BuildMessage[]; rawLines: string[] } {
         if (raw.length === 0) return { output: '', errors: [], warnings: [], rawLines: [] };
         const tmp = path.join(os.tmpdir(), `nexia-tool-out-${process.pid}-${Date.now()}.txt`);
+        const t0 = Date.now();
         try {
             fs.writeFileSync(tmp, raw);
             const core = path.join(__dirname, '..', 'nexia-core.exe');
-            const res = JSON.parse(execFileSync(core, ['build', 'parse', tmp],
-                { encoding: 'utf8', windowsHide: true, maxBuffer: 256 * 1024 * 1024 }));
+            const parsed = execFileSync(core, ['build', 'parse', tmp],
+                { encoding: 'utf8', windowsHide: true, maxBuffer: 256 * 1024 * 1024 });
+            logCore(['build', 'parse'], t0, undefined, parsed);
+            const res = JSON.parse(parsed);
             return {
                 // `output` is every line and feeds the Output panel; `raw` is the
                 // filtered subset. Two different things — the old parser kept both
@@ -1082,6 +1089,7 @@ export class BuildSystem {
                 rawLines: res.raw || [],
             };
         } catch (err: any) {
+            logCore(['build', 'parse'], t0, err);
             // A parse that fails must not swallow the build. Surface the bytes.
             return {
                 output: '',

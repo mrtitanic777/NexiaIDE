@@ -15,6 +15,7 @@
  * being silently dropped.
  */
 
+import { logCore } from './coreLog';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
@@ -31,13 +32,16 @@ import { ProjectConfig, BuildConfiguration, ConfigurationSettings, SolutionInfo,
  */
 function core(args: string[]): any {
     const exe = path.join(__dirname, '..', 'nexia-core.exe');
+    const t0 = Date.now();
     let out: string;
     try {
         out = execFileSync(exe, args, { encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
     } catch (err: any) {
         out = err?.stdout?.toString() || '';
+        logCore(args, t0, err);
         if (!out) throw err;
     }
+    logCore(args, t0, undefined, out);
     const res = JSON.parse(out);
     if (!res.ok) throw new Error(res.error || 'nexia-core refused the request');
     return res;

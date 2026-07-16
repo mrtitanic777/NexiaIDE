@@ -17,6 +17,7 @@
  * correctly now.
  */
 
+import { logCore } from './coreLog';
 import { execFileSync } from 'child_process';
 import * as path from 'path';
 
@@ -51,11 +52,15 @@ export type WebProvider = 'google' | 'brave';
  */
 function core<T>(args: string[]): SearchResponse<T> {
     const exe = path.join(__dirname, '..', 'nexia-core.exe');
+    const t0 = Date.now();
     try {
         const out = execFileSync(exe, args, { encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+        // The search key is in argv; log the command shape, never the args verbatim.
+        logCore(args.slice(0, 2), t0, undefined, out);
         return JSON.parse(out);
     } catch (err: any) {
         const out = err?.stdout?.toString();
+        logCore(args.slice(0, 2), t0, err, out);
         if (out) { try { return JSON.parse(out); } catch { /* fall through */ } }
         return { success: false, error: 'Search is unavailable (nexia-core did not run).' };
     }
