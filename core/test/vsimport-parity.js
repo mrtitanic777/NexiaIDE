@@ -40,7 +40,8 @@ const mod = (() => {
     }).outputText;
     // Names to hoist out of module scope for the tests.
     const wanted = ['mapWarningLevel', 'mapOptimization', 'mapRuntimeLibrary', 'mapExceptions',
-        'mapConfigurationType', 'unescapeMsbuild', 'isUnresolvableMacro', 'parseSolution'];
+        'mapConfigurationType', 'unescapeMsbuild', 'isUnresolvableMacro', 'parseSolution',
+        'parseVcproj', 'parseVcxproj'];
     const tail = '\n' + wanted.map(n => `try{exports.${n}=${n}}catch(e){}`).join(';');
     const box = { exports: {} };
     new Function('require', 'exports', 'module', js + tail)
@@ -154,6 +155,72 @@ function fail(m) { bad++; console.log('  *** ' + m); }
             }
             console.log(`  solution: ${ts.projects.length} projects (skipped a folder + a .csproj), exists flags checked`);
         }
+    }
+}
+
+/* deep-equal that respects array order but not object key order, and treats a
+ * missing key and an undefined value as the same (JSON.stringify drops both). */
+function deepEq(a, b, pathStr = '') {
+    if (a === b) return true;
+    if (Array.isArray(a) || Array.isArray(b)) {
+        if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) {
+            fail(`${pathStr}: array differs ts=${JSON.stringify(a)} c=${JSON.stringify(b)}`); return false;
+        }
+        let ok = true;
+        for (let i = 0; i < a.length; i++) if (!deepEq(a[i], b[i], `${pathStr}[${i}]`)) ok = false;
+        return ok;
+    }
+    if (a && b && typeof a === 'object' && typeof b === 'object') {
+        const keys = new Set([...Object.keys(a), ...Object.keys(b)].filter(k => a[k] !== undefined || b[k] !== undefined));
+        let ok = true;
+        for (const k of keys) if (!deepEq(a[k], b[k], pathStr ? `${pathStr}.${k}` : k)) ok = false;
+        return ok;
+    }
+    fail(`${pathStr}: ts=${JSON.stringify(a)} c=${JSON.stringify(b)}`);
+    return false;
+}
+
+/* ── layer 3: parseVcproj on a realistic legacy fixture ─────────────────────── */
+{
+    const parseVcproj = lift('parseVcproj');
+    const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'nexia-vcproj-'));
+    const dir = fs.mkdtempSync(path.join(TMP, 'p-'));
+    const proj = path.join(dir, 'Legacy.vcproj');
+    const vcproj = `<?xml version="1.0" encoding="Windows-1252"?>
+<VisualStudioProject ProjectType="Visual C++" Version="9.00" Name="Legacy">
+  <Files>
+    <File RelativePath=".\\src\\stdafx.cpp"></File>
+    <File RelativePath=".\\src\\stdafx.h"></File>
+    <File RelativePath="src\\main.cpp"></File>
+    <File RelativePath=".\\readme.txt"></File>
+    <File RelativePath="$(XEDK)\\gen.cpp"></File>
+  </Files>
+  <Configurations>
+    <Configuration Name="Debug|Xbox 360" ConfigurationType="1">
+      <Tool Name="VCCLCompilerTool"
+        Optimization="0" AdditionalIncludeDirectories="include;$(XEDK)\\include;$(ProjectDir)src"
+        PreprocessorDefinitions="_XBOX;_DEBUG;%(Foo)" RuntimeLibrary="1" WarningLevel="3"
+        RuntimeTypeInfo="false" ExceptionHandling="2" WarnAsError="true"
+        UsePrecompiledHeader="2" PrecompiledHeaderThrough="stdafx.h" />
+      <Tool Name="VCLinkerTool"
+        AdditionalDependencies="xapilib.lib   d3d9d.lib  xgraphicsd.lib"
+        AdditionalLibraryDirectories="$(XEDK)\\lib\\xbox;lib" />
+    </Configuration>
+    <Configuration Name="Release|Xbox 360" ConfigurationType="1">
+      <Tool Name="VCCLCompilerTool" Optimization="2" RuntimeLibrary="0" />
+    </Configuration>
+  </Configurations>
+</VisualStudioProject>`;
+    fs.writeFileSync(proj, vcproj, 'utf-8');
+
+    const ts = parseVcproj(proj);
+    let c;
+    try { c = JSON.parse(execFileSync(CORE, ['vsimport', 'vcproj', proj], { encoding: 'utf8' })); }
+    catch (e) { fail(`vcproj: C threw: ${e.message}`); c = null; }
+    if (c) {
+        delete c.ok;
+        checks++;
+        if (deepEq(ts, c, 'vcproj')) console.log(`  vcproj:   ${ts.sources.length} src, ${ts.headers.length} hdr, flags + warnings match`);
     }
 }
 

@@ -233,6 +233,24 @@ static void base_stem(const wchar_t *p, wchar_t *out, size_t cap)
     if (dot && dot != out) *dot = 0;
 }
 
+/* path.basename(p) keeping the extension — the last path segment. */
+static void base_stem_keepext(const wchar_t *p, wchar_t *out, size_t cap)
+{
+    const wchar_t *b = p;
+    for (const wchar_t *q = p; *q; q++)
+        if (*q == L'\\' || *q == L'/') b = q + 1;
+    nx_copy(out, cap, b);
+}
+
+/* case-insensitive equality after trimming s (b is a trimmed ASCII literal). */
+static int ieq_trim(const wchar_t *s, const wchar_t *b)
+{
+    wchar_t t[64];
+    nx_copy(t, 64, s ? s : L"");
+    trim(t);
+    return ieq(t, b);
+}
+
 /*
  * path.resolve(dir, rel): rel if it is already absolute, else dir\rel, and in
  * either case run through GetFullPathName so '.' and '..' collapse. Node
@@ -349,6 +367,390 @@ static int parse_solution(const wchar_t *slnPath)
     return 0;
 }
 
+/* ── a growable wide-string list ──────────────────────────────────────────── */
+
+typedef struct { wchar_t **v; int n, cap; } wlist;
+
+static void wl_push(wlist *l, const wchar_t *s)
+{
+    if (l->n == l->cap) {
+        l->cap = l->cap ? l->cap * 2 : 8;
+        l->v = (wchar_t **)realloc(l->v, (size_t)l->cap * sizeof(wchar_t *));
+    }
+    l->v[l->n++] = _wcsdup(s);
+}
+
+static void wl_free(wlist *l)
+{
+    for (int i = 0; i < l->n; i++) free(l->v[i]);
+    free(l->v);
+    l->v = NULL; l->n = l->cap = 0;
+}
+
+static int wl_has_ci(const wlist *l, const wchar_t *s)
+{
+    for (int i = 0; i < l->n; i++) if (!_wcsicmp(l->v[i], s)) return 1;
+    return 0;
+}
+
+static void emit_wl(FILE *f, const wlist *l)
+{
+    fputc('[', f);
+    for (int i = 0; i < l->n; i++) { if (i) fputc(',', f); nx_json_str(f, l->v[i]); }
+    fputc(']', f);
+}
+
+/* ── the string extraction the regexes did ────────────────────────────────── */
+
+/*
+ * splitList: a VS semicolon list -> trimmed non-empty entries, dropping the
+ * /^%\(.*\)$/ inherit markers. Appends to l.
+ */
+static void split_list(const wchar_t *raw, wlist *l)
+{
+    if (!raw) return;
+    const wchar_t *p = raw;
+    while (*p) {
+        const wchar_t *semi = wcschr(p, L';');
+        size_t len = semi ? (size_t)(semi - p) : wcslen(p);
+        wchar_t item[NX_PATH];
+        if (len >= NX_PATH) len = NX_PATH - 1;
+        wcsncpy(item, p, len); item[len] = 0;
+        trim(item);
+        /* drop empties and a bare %(...) inherit marker */
+        size_t il = wcslen(item);
+        int inherit = (il >= 3 && item[0] == L'%' && item[1] == L'(' && item[il - 1] == L')');
+        if (il && !inherit) wl_push(l, item);
+        if (!semi) break;
+        p = semi + 1;
+    }
+}
+
+/*
+ * resolveProjectMacros: strip a leading $(ProjectDir)/$(MSBuildProjectDirectory)/
+ * $(MSBuildThisFileDirectory) and one following separator, then a leading ./ or
+ * .\, then trim. In place.
+ */
+static void resolve_project_macros(wchar_t *s)
+{
+    static const wchar_t *M[] = {
+        L"$(ProjectDir)", L"$(MSBuildProjectDirectory)", L"$(MSBuildThisFileDirectory)"
+    };
+    for (int i = 0; i < 3; i++) {
+        size_t ml = wcslen(M[i]);
+        /* case-insensitive prefix */
+        int pre = 1;
+        for (size_t k = 0; k < ml; k++) {
+            wchar_t a = s[k], b = M[i][k];
+            if (a >= L'A' && a <= L'Z') a += 32;
+            if (b >= L'A' && b <= L'Z') b += 32;
+            if (a != b) { pre = 0; break; }
+        }
+        if (pre) {
+            size_t skip = ml;
+            if (s[skip] == L'\\' || s[skip] == L'/') skip++;
+            memmove(s, s + skip, (wcslen(s + skip) + 1) * sizeof(wchar_t));
+            break;
+        }
+    }
+    if (s[0] == L'.' && (s[1] == L'\\' || s[1] == L'/'))
+        memmove(s, s + 2, (wcslen(s + 2) + 1) * sizeof(wchar_t));
+    trim(s);
+}
+
+/*
+ * filterPaths: resolveProjectMacros each, drop the ones that were just the
+ * project root, drop (into `dropped`) any still carrying an unresolvable macro,
+ * toHostPath the rest into `kept`.
+ */
+static void filter_paths(const wlist *in, wlist *kept, wlist *dropped)
+{
+    for (int i = 0; i < in->n; i++) {
+        wchar_t r[NX_PATH];
+        nx_copy(r, NX_PATH, in->v[i]);
+        resolve_project_macros(r);
+        if (!r[0]) continue;                         /* was just "$(ProjectDir)" */
+        if (vs_is_unresolvable_macro(r)) { wl_push(dropped, in->v[i]); continue; }
+        to_host_path(r);
+        wl_push(kept, r);
+    }
+}
+
+/* attr(block, name): the regex `name="([^"]*)"`, first match. Returns 1 + fills
+ * out, else 0. Case-insensitive on the name, as the /i flag was. */
+static int attr(const wchar_t *block, const wchar_t *name, wchar_t *out, size_t cap)
+{
+    size_t nl = wcslen(name);
+    for (const wchar_t *p = block; *p; p++) {
+        /* match name (ci) then =" */
+        size_t k = 0;
+        for (; k < nl; k++) {
+            wchar_t a = p[k], b = name[k];
+            if (a >= L'A' && a <= L'Z') a += 32;
+            if (b >= L'A' && b <= L'Z') b += 32;
+            if (a != b) break;
+        }
+        if (k == nl && p[nl] == L'=' && p[nl + 1] == L'"') {
+            const wchar_t *v = p + nl + 2;
+            const wchar_t *end = wcschr(v, L'"');
+            if (!end) return 0;
+            size_t len = (size_t)(end - v);
+            if (len >= cap) len = cap - 1;
+            wcsncpy(out, v, len); out[len] = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* parseBool: undefined for null/empty (returned as -1), else /^(true|1)$/i. */
+static int parse_bool(const wchar_t *v)
+{
+    if (!v || !v[0]) return -1;
+    wchar_t t[16];
+    nx_copy(t, 16, v);
+    trim(t);
+    if (ieq(t, L"true") || ieq(t, L"1")) return 1;
+    return 0;
+}
+
+/* SOURCE_RE / HEADER_RE. */
+static int is_source(const wchar_t *p)
+{
+    return iends(p, L".cpp") || iends(p, L".c") || iends(p, L".cc") || iends(p, L".cxx");
+}
+static int is_header(const wchar_t *p)
+{
+    return iends(p, L".h") || iends(p, L".hpp") || iends(p, L".hxx") || iends(p, L".inl");
+}
+
+/*
+ * inferPch: explicit if given; else the basename of a stdafx/pch header in the
+ * project when the mode is Use/2, or when one is simply present. -1 sentinel is
+ * "undefined" (the field is omitted).
+ */
+static void infer_pch(const wchar_t *explicit_, const wchar_t *mode, const wlist *headers,
+                      wchar_t *out, size_t cap, int *have)
+{
+    *have = 0;
+    if (explicit_ && explicit_[0]) { nx_copy(out, cap, explicit_); *have = 1; return; }
+
+    /* /(^|[\\/])(stdafx|pch)\.h$/i over the headers */
+    const wchar_t *known = NULL;
+    for (int i = 0; i < headers->n; i++) {
+        const wchar_t *h = headers->v[i];
+        if (iends(h, L"stdafx.h") || iends(h, L"pch.h")) {
+            /* the char before the stem must be start or a separator */
+            size_t hl = wcslen(h);
+            size_t stem = iends(h, L"stdafx.h") ? 8 : 5;   /* len of stdafx.h / pch.h */
+            const wchar_t *before = (hl > stem) ? h + (hl - stem - 1) : NULL;
+            if (!before || *before == L'\\' || *before == L'/') { known = h; break; }
+        }
+    }
+    wchar_t base[NX_PATH];
+    if (known) base_stem_keepext(known, base, NX_PATH);
+
+    int useMode = mode && (ieq_trim(mode, L"Use") || ieq_trim(mode, L"2"));
+    if (useMode) { nx_copy(out, cap, known ? base : L"stdafx.h"); *have = 1; return; }
+    if (known) { nx_copy(out, cap, base); *have = 1; return; }
+    /* undefined */
+}
+
+/* ── .vcproj (VS2005/2008 legacy) ─────────────────────────────────────────── */
+
+/* find `<Tool\s+Name="TOOL"...>` and return the attribute blob after the Name
+ * quote, up to the tag's closing '>' (a trailing '/' excluded), as the regex
+ * `<Tool\s+Name="TOOL"([\s\S]*?)\/?>` captured it. NULL if not present. The blob
+ * is copied into out. */
+static int tool_blob(const wchar_t *xml, const wchar_t *tool, wchar_t *out, size_t cap)
+{
+    wchar_t needle[64];
+    _snwprintf(needle, 64, L"Name=\"%ls\"", tool);
+    for (const wchar_t *p = wcsstr(xml, L"<Tool"); p; p = wcsstr(p + 1, L"<Tool")) {
+        /* require whitespace, then Name="TOOL" as the first attribute */
+        const wchar_t *q = p + 5;
+        if (!iswspace(*q)) continue;
+        while (iswspace(*q)) q++;
+        if (wcsncmp(q, needle, wcslen(needle))) continue;
+        const wchar_t *blob = q + wcslen(needle);
+        const wchar_t *gt = wcschr(blob, L'>');
+        if (!gt) return 0;
+        const wchar_t *endb = gt;
+        if (endb > blob && endb[-1] == L'/') endb--;   /* drop the trailing / of /> */
+        size_t len = (size_t)(endb - blob);
+        if (len >= cap) len = cap - 1;
+        wcsncpy(out, blob, len); out[len] = 0;
+        return 1;
+    }
+    return 0;
+}
+
+/* the full `<Configuration ...>...</Configuration>` block chosen by parseVcproj:
+ * the one whose Name attribute starts "Debug", else the first. */
+static int vcproj_config(const wchar_t *xml, wchar_t *out, size_t cap)
+{
+    const wchar_t *first = NULL; size_t firstLen = 0;
+    for (const wchar_t *p = wcsstr(xml, L"<Configuration"); p; p = wcsstr(p + 1, L"<Configuration")) {
+        const wchar_t *close = wcsstr(p, L"</Configuration>");
+        if (!close) break;
+        size_t len = (size_t)(close + 16 - p);
+        if (!first) { first = p; firstLen = len; }
+        /* /Name="Debug/i somewhere in the block header */
+        wchar_t head[512];
+        size_t hl = len < 511 ? len : 511;
+        wcsncpy(head, p, hl); head[hl] = 0;
+        if (istr(head, L"Name=\"Debug")) {
+            if (len >= cap) len = cap - 1;
+            wcsncpy(out, p, len); out[len] = 0;
+            return 1;
+        }
+    }
+    if (first) {
+        if (firstLen >= cap) firstLen = cap - 1;
+        wcsncpy(out, first, firstLen); out[firstLen] = 0;
+        return 1;
+    }
+    out[0] = 0;
+    return 0;
+}
+
+/* whitespace runs -> a single ';', for AdditionalDependencies' space list. */
+static void ws_to_semi(wchar_t *s)
+{
+    wchar_t *o = s;
+    int inws = 0;
+    for (wchar_t *p = s; *p; p++) {
+        if (iswspace(*p)) { if (!inws) { *o++ = L';'; inws = 1; } }
+        else { *o++ = *p; inws = 0; }
+    }
+    *o = 0;
+}
+
+/* emit the shared tail of both parsers: the flag fields and warnings. `cl` and
+ * `link` are the compiler/linker attribute (or tag) blocks. */
+static void emit_flags(FILE *f,
+                       const char *type,
+                       const wlist *inc, const wlist *libDirs, const wlist *libs, const wlist *defs,
+                       const wchar_t *pch, int havePch,
+                       int rtti, const char *eh, const char *rt, int wl, int twae, const char *opt,
+                       const wlist *warnings)
+{
+    printf("\"type\":\"%s\",", type);
+    printf("\"includeDirectories\":");  emit_wl(f, inc);     printf(",");
+    printf("\"libraryDirectories\":");  emit_wl(f, libDirs); printf(",");
+    printf("\"libraries\":");           emit_wl(f, libs);    printf(",");
+    printf("\"defines\":");             emit_wl(f, defs);    printf(",");
+    if (havePch) { printf("\"pchHeader\":"); nx_json_str(f, pch); printf(","); }
+    if (rtti >= 0) printf("\"enableRtti\":%s,", rtti ? "true" : "false");
+    if (eh) printf("\"exceptionHandling\":\"%s\",", eh);
+    if (rt) printf("\"runtimeLibrary\":\"%s\",", rt);
+    if (wl >= 0) printf("\"warningLevel\":%d,", wl);
+    if (twae >= 0) printf("\"treatWarningsAsErrors\":%s,", twae ? "true" : "false");
+    if (opt) printf("\"optimizationOverride\":\"%s\",", opt);
+    printf("\"warnings\":"); emit_wl(f, warnings);
+}
+
+static int parse_vcproj(const wchar_t *projPath)
+{
+    wchar_t *xml = read_utf8(projPath);
+    if (!xml) { nx_json_error("vsimport project: cannot read the .vcproj"); return 1; }
+
+    wlist sources = {0}, headers = {0}, others = {0}, warnings = {0};
+
+    /* <File RelativePath="..."> items */
+    for (const wchar_t *p = wcsstr(xml, L"<File"); p; p = wcsstr(p + 1, L"<File")) {
+        const wchar_t *q = p + 5;
+        if (!iswspace(*q)) continue;
+        while (iswspace(*q)) q++;
+        if (wcsncmp(q, L"RelativePath=\"", 14)) continue;
+        const wchar_t *v = q + 14, *end = wcschr(v, L'"');
+        if (!end) continue;
+        wchar_t rel[NX_PATH];
+        size_t len = (size_t)(end - v); if (len >= NX_PATH) len = NX_PATH - 1;
+        wcsncpy(rel, v, len); rel[len] = 0;
+        to_host_path(rel);
+        /* strip a leading .\ or ./ (already backslashed by to_host_path) */
+        if (rel[0] == L'.' && rel[1] == L'\\') memmove(rel, rel + 2, (wcslen(rel + 2) + 1) * sizeof(wchar_t));
+        if (vs_is_unresolvable_macro(rel)) {
+            wchar_t w[NX_PATH]; _snwprintf(w, NX_PATH, L"Skipped item with unresolved macro: %ls", rel);
+            wl_push(&warnings, w); continue;
+        }
+        if (is_source(rel)) wl_push(&sources, rel);
+        else if (is_header(rel)) wl_push(&headers, rel);
+        else wl_push(&others, rel);
+    }
+
+    wchar_t cfg[8192];
+    vcproj_config(xml, cfg, 8192);
+
+    wchar_t clTool[8192] = L"", linkTool[8192] = L"";
+    tool_blob(cfg, L"VCCLCompilerTool", clTool, 8192);
+    tool_blob(cfg, L"VCLinkerTool", linkTool, 8192);
+
+    wchar_t v[NX_PATH];
+    wlist rawInc = {0}, rawLibDirs = {0}, rawLibs = {0}, rawDefs = {0};
+    if (attr(clTool, L"AdditionalIncludeDirectories", v, NX_PATH)) split_list(v, &rawInc);
+    if (attr(linkTool, L"AdditionalLibraryDirectories", v, NX_PATH)) split_list(v, &rawLibDirs);
+    if (attr(linkTool, L"AdditionalDependencies", v, NX_PATH)) { ws_to_semi(v); split_list(v, &rawLibs); }
+    if (attr(clTool, L"PreprocessorDefinitions", v, NX_PATH)) split_list(v, &rawDefs);
+
+    wlist inc = {0}, dropInc = {0}, libDirs = {0}, dropLib = {0};
+    filter_paths(&rawInc, &inc, &dropInc);
+    filter_paths(&rawLibDirs, &libDirs, &dropLib);
+    for (int i = 0; i < dropInc.n; i++) { wchar_t w[NX_PATH]; _snwprintf(w, NX_PATH, L"Include path not imported (VS/SDK macro): %ls", dropInc.v[i]); wl_push(&warnings, w); }
+    for (int i = 0; i < dropLib.n; i++) { wchar_t w[NX_PATH]; _snwprintf(w, NX_PATH, L"Library path not imported (VS/SDK macro): %ls", dropLib.v[i]); wl_push(&warnings, w); }
+
+    /* libraries: drop unresolvable */
+    wlist libs = {0};
+    for (int i = 0; i < rawLibs.n; i++) if (!vs_is_unresolvable_macro(rawLibs.v[i])) wl_push(&libs, rawLibs.v[i]);
+    wlist defs = {0};
+    for (int i = 0; i < rawDefs.n; i++) if (!vs_is_unresolvable_macro(rawDefs.v[i])) wl_push(&defs, rawDefs.v[i]);
+
+    /* type from ConfigurationType="<digit>" in the config block */
+    wchar_t ctype[8] = L"";
+    const wchar_t *ct = istr(cfg, L"ConfigurationType=\"");
+    if (ct) { ct += 19; if (iswdigit(*ct)) { ctype[0] = *ct; ctype[1] = 0; } }
+    const char *type = vs_map_configuration_type(ctype[0] ? ctype : NULL);
+
+    /* pch */
+    wchar_t pthrough[NX_PATH] = L"", puse[NX_PATH] = L"", pch[NX_PATH]; int havePch = 0;
+    int hasThrough = attr(clTool, L"PrecompiledHeaderThrough", pthrough, NX_PATH);
+    int hasUse = attr(clTool, L"UsePrecompiledHeader", puse, NX_PATH);
+    infer_pch(hasThrough ? pthrough : NULL, hasUse ? puse : NULL, &headers, pch, NX_PATH, &havePch);
+
+    /* flag fields */
+    wchar_t rttiV[16] = L"", ehV[32] = L"", rtV[32] = L"", wlV[32] = L"", twaeV[16] = L"", optV[32] = L"";
+    int rtti = parse_bool(attr(clTool, L"RuntimeTypeInfo", rttiV, 16) ? rttiV : NULL);
+    const char *eh = vs_map_exceptions(attr(clTool, L"ExceptionHandling", ehV, 32) ? ehV : NULL);
+    const char *rt = vs_map_runtime_library(attr(clTool, L"RuntimeLibrary", rtV, 32) ? rtV : NULL);
+    int wl = vs_map_warning_level(attr(clTool, L"WarningLevel", wlV, 32) ? wlV : NULL);
+    int twae = parse_bool(attr(clTool, L"WarnAsError", twaeV, 16) ? twaeV : NULL);
+    const char *opt = vs_map_optimization(attr(clTool, L"Optimization", optV, 32) ? optV : NULL);
+
+    wchar_t name[NX_PATH];
+    base_stem(projPath, name, NX_PATH);
+
+    printf("{\"ok\":true,");
+    printf("\"name\":");        nx_json_str(stdout, name);     printf(",");
+    printf("\"projectPath\":"); nx_json_str(stdout, projPath); printf(",");
+    printf("\"format\":\"vcproj\",");
+    printf("\"projectReferences\":[],");
+    printf("\"configurations\":{},");
+    printf("\"sources\":");   emit_wl(stdout, &sources); printf(",");
+    printf("\"headers\":");   emit_wl(stdout, &headers); printf(",");
+    printf("\"otherFiles\":");emit_wl(stdout, &others);  printf(",");
+    emit_flags(stdout, type, &inc, &libDirs, &libs, &defs, pch, havePch,
+               rtti, eh, rt, wl, twae, opt, &warnings);
+    printf("}\n");
+
+    wl_free(&sources); wl_free(&headers); wl_free(&others); wl_free(&warnings);
+    wl_free(&rawInc); wl_free(&rawLibDirs); wl_free(&rawLibs); wl_free(&rawDefs);
+    wl_free(&inc); wl_free(&dropInc); wl_free(&libDirs); wl_free(&dropLib);
+    wl_free(&libs); wl_free(&defs);
+    free(xml);
+    return 0;
+}
+
 /* ── the CLI, for the parity test ─────────────────────────────────────────── */
 
 /*
@@ -392,6 +794,11 @@ int nx_cmd_vsimport(int argc, wchar_t **argv)
     if (!wcscmp(argv[0], L"solution")) {
         if (argc < 2) { nx_json_error("vsimport solution: expected <path.sln>"); return 2; }
         return parse_solution(argv[1]);
+    }
+
+    if (!wcscmp(argv[0], L"vcproj")) {
+        if (argc < 2) { nx_json_error("vsimport vcproj: expected <path.vcproj>"); return 2; }
+        return parse_vcproj(argv[1]);
     }
 
     nx_json_error("vsimport: unknown subcommand");
