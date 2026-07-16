@@ -94,6 +94,12 @@ int nx_cmd_xex(int argc, wchar_t **argv);
 /* ── project.c ── */
 int nx_cmd_project(int argc, wchar_t **argv);
 
+/* ── emulator.c / extensions.c / buildsystem.c ── */
+int nx_cmd_emulator(int argc, wchar_t **argv);
+int nx_cmd_extensions(int argc, wchar_t **argv);
+int nx_cmd_build(int argc, wchar_t **argv);
+
+
 /* ── util.c ── */
 int  nx_exists(const wchar_t *path);
 int  nx_is_dir(const wchar_t *path);

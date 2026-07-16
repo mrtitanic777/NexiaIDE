@@ -14,7 +14,7 @@
     "dev": "npm run build && electron .",
     "build:helpers": "node scripts/build-extract-sdk.js && node scripts/build-core.js",
     "build:core": "node scripts/build-core.js",
-    "test:core": "node scripts/build-core.js && node core/test/toolchain-parity.js"
+    "test:core": "node scripts/build-core.js && node core/test/toolchain-parity.js && node core/test/env-parity.js && node core/test/xex-parity.js && node core/test/project-parity.js && node core/test/emulator-parity.js && node core/test/extensions-parity.js && node core/test/buildsystem-parity.js"
   },
   "build": {
     "appId": "com.nexia.ide",

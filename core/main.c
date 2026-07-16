@@ -121,6 +121,9 @@ int wmain(int argc, wchar_t **argv)
     if (!wcscmp(argv[1], L"tool"))    return nx_cmd_tool(argc - 2, argv + 2);
     if (!wcscmp(argv[1], L"xex"))     return nx_cmd_xex(argc - 2, argv + 2);
     if (!wcscmp(argv[1], L"project")) return nx_cmd_project(argc - 2, argv + 2);
+    if (!wcscmp(argv[1], L"emulator")) return nx_cmd_emulator(argc - 2, argv + 2);
+    if (!wcscmp(argv[1], L"extensions")) return nx_cmd_extensions(argc - 2, argv + 2);
+    if (!wcscmp(argv[1], L"build"))   return nx_cmd_build(argc - 2, argv + 2);
 
     nx_json_error("unknown command");
     return 2;
