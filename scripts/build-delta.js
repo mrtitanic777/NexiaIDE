@@ -78,8 +78,14 @@ const NSIS = path.join(process.env.LOCALAPPDATA, 'electron-builder', 'Cache', 'n
                        'nsis-3.0.4.1', 'Bin', 'makensis.exe');
 if (!fs.existsSync(NSIS)) fail(`makensis not found at ${NSIS}`);
 
+// The numeric part alone, for the Windows version resource: it takes four
+// numbers, so "3.3.0-dev" has to arrive there as "3.3.0". The full string keeps
+// its tag everywhere a human reads it.
+const versionNum = /^(\d+(?:\.\d+)*)/.exec(pkg.version)?.[1] || '0.0.0';
+
 console.log(`  building delta for ${pkg.version}...`);
-execFileSync(NSIS, [`-DVERSION=${pkg.version}`, path.join(ROOT, 'installer', 'delta.nsi')],
+execFileSync(NSIS, [`-DVERSION=${pkg.version}`, `-DVERSION_NUM=${versionNum}`,
+                    path.join(ROOT, 'installer', 'delta.nsi')],
              { stdio: 'inherit' });
 
 const out = path.join(ROOT, 'dist', 'NexiaUpdate.exe');

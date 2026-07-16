@@ -41,7 +41,12 @@ SetCompressor /SOLID lzma
 ; prints one line each.
 !define MUI_ICON "..\resources\icon.ico"
 
-VIProductVersion "${VERSION}.0"
+; Windows' version resource is four numbers and nothing else, so a prerelease
+; build like 3.3.0-dev cannot go here — makensis rejects it outright. VERSION_NUM
+; is the numeric part alone; the full string, tag and all, still goes in the
+; FileVersion/ProductVersion keys below, which are free text and are what a user
+; actually reads in the file's properties.
+VIProductVersion "${VERSION_NUM}.0"
 VIAddVersionKey "ProductName"      "${APPNAME}"
 VIAddVersionKey "FileDescription"  "${APPNAME} Update"
 VIAddVersionKey "CompanyName"      "${COMPANY}"
