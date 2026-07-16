@@ -73,9 +73,18 @@ void nx_json_str(FILE *f, const wchar_t *s)
         case '\n': fputs("\\n", f);  break;
         case '\r': fputs("\\r", f);  break;
         case '\t': fputs("\\t", f);  break;
+        /* \b and \f have short forms in JSON, and JSON.stringify uses them.
+         *  parses to the same character, so this is not about correctness
+         * — it is about these bytes being identical to the ones the TypeScript
+         * writes, because nexia.json is written by whichever of the two got
+         * there first and both sides read it back. A project's `name` is stored
+         * raw, unsanitised, so a control character can reach here. */
+        case '\b': fputs("\\b", f);  break;
+        case '\f': fputs("\\f", f);  break;
         default:
             /* Control characters must be escaped; UTF-8 continuation bytes
-             * (>= 0x80) must not be touched — they are already valid JSON. */
+             * (>= 0x80) must not be touched — they are already valid JSON.
+             * Lowercase hex, as JSON.stringify emits. */
             if (*p < 0x20) fprintf(f, "\\u%04x", *p);
             else fputc(*p, f);
         }
