@@ -23,6 +23,35 @@ const PROJECT_FILE = 'nexia.json';
 const NAME_TOKEN = /__PROJECT__/g;
 
 /**
+ * The other two names the XDK wizard substitutes.
+ *
+ * UPPER is what guards the export macro (MYLIB_EXPORTS -> MYLIB_API), SAFE is
+ * what the exported function is named after (fnMyLib). Both are the project
+ * name run through the wizard's CreateSafeName, not the raw name: they end up
+ * inside C identifiers, where a space or a hyphen would not compile.
+ */
+const NAME_TOKEN_UPPER = /__PROJECT_UPPER__/g;
+const NAME_TOKEN_SAFE = /__PROJECT_SAFE__/g;
+
+/**
+ * Visual Studio's CreateSafeName, reproduced exactly.
+ *
+ * From VC#\VC#Wizards\1033\common.js: keep only [A-Za-z0-9_], and prepend
+ * "My" if the result is empty or starts with a digit — an identifier cannot
+ * begin with one. A project called "3D Engine" becomes My3DEngine, which is
+ * what the wizard would have called it.
+ */
+function createSafeName(name: string): string {
+    let safe = '';
+    for (const ch of name) {
+        if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch === '_' || (ch >= '0' && ch <= '9')) safe += ch;
+    }
+    if (safe === '') return 'My';
+    if (safe[0] >= '0' && safe[0] <= '9') return 'My' + safe;
+    return safe;
+}
+
+/**
  * Make a project name safe to use as a filename.
  *
  * Project names reach here straight from a text box, and this value becomes a
@@ -93,6 +122,25 @@ bin\\win32 folder.
 Building the project compiles every .xui here into a binary .xur and packs
 them into media\\<Project>.xzp next to the XEX, and copies the font beside it.
 Both are loaded at runtime through file://game:/media/ locators.
+`;
+
+/**
+ * The DLL template's header — the wizard's root.h, DLL_APP branch.
+ * Sits next to the .cpp, which includes it by name, exactly as VS lays it out.
+ */
+const DLL_HEADER = `// The following ifdef block is the standard way of creating macros which make exporting 
+// from a DLL simpler. All files within this DLL are compiled with the __PROJECT_UPPER___EXPORTS
+// symbol defined on the command line. this symbol should not be defined on any project
+// that uses this DLL. This way any other project whose source files include this file see 
+// __PROJECT_UPPER___API functions as being imported from a DLL, whereas this DLL sees symbols
+// defined with this macro as being exported.
+#ifdef __PROJECT_UPPER___EXPORTS
+#define __PROJECT_UPPER___API __declspec(dllexport)
+#else
+#define __PROJECT_UPPER___API __declspec(dllimport)
+#endif
+
+__PROJECT_UPPER___API int fn__PROJECT_SAFE__(void);
 `;
 
 // ── Template Source Files ──
@@ -1116,83 +1164,48 @@ export class ProjectManager {
             {
                 id: 'dll',
                 name: 'Dynamic Library (.xex)',
-                description: 'Xbox 360 dynamic link library with exported functions.',
+                description: 'The XDK wizard\'s DLL: an entry point and one exported function.',
                 icon: '🔗',
                 files: [
                     { path: 'src/stdafx.h', content: STDAFX_H },
                     { path: 'src/stdafx.cpp', content: STDAFX_CPP },
+                    // The header goes beside the .cpp, which includes it by
+                    // name — the layout Templates.inf gives a DLL_APP project.
+                    { path: 'src/__PROJECT__.h', content: DLL_HEADER },
                     { path: 'src/__PROJECT__.cpp', content:
-`#include "stdafx.h"
+`// __PROJECT__.cpp : Defines the entry point for the DLL application.
+//
 
-// ── DLL Export Macros ──
-#ifdef BUILDING_DLL
-#define DLL_EXPORT __declspec(dllexport)
-#else
-#define DLL_EXPORT __declspec(dllimport)
-#endif
+#include "stdafx.h"
+#include "__PROJECT__.h"
 
-// ── XNotifyQueueUI (ordinal 656 from xam.xex — not in any public header) ──
-typedef VOID (WINAPI *XNotifyQueueUI_t)(DWORD dwType, DWORD dwUserIndex,
-                                        DWORD dwPriority, LPCWSTR pwszText,
-                                        ULONGLONG qwParam);
-static XNotifyQueueUI_t g_XNotifyQueueUI = NULL;
-
-static void InitXNotify()
+BOOL APIENTRY DllMain( HANDLE hModule, 
+                       DWORD  ul_reason_for_call, 
+                       LPVOID lpReserved
+                     )
 {
-    if (g_XNotifyQueueUI != NULL) return;
-    HMODULE hXam = GetModuleHandle("xam.xex");
-    if (hXam)
-        g_XNotifyQueueUI = (XNotifyQueueUI_t)GetProcAddress(hXam, (LPCSTR)656);
-}
-
-static void ShowNotification(const WCHAR* text)
-{
-    if (g_XNotifyQueueUI)
-        g_XNotifyQueueUI(0, 0, 2, text, 0);
-}
-
-// ── DLL Entry Point ──
-BOOL APIENTRY DllMain(HANDLE hModule, DWORD dwReason, LPVOID lpReserved)
-{
-    switch (dwReason) {
-    case DLL_PROCESS_ATTACH:
-        InitXNotify();
-        ShowNotification(L"Hello Xbox! This is from NexiaIDE!");
-        break;
-    case DLL_PROCESS_DETACH:
-        break;
-    }
     return TRUE;
 }
 
-// ── Exported Functions ──
-extern "C" {
-
-DLL_EXPORT int MyLibraryInit(void)
+// This is an example of an exported function.
+__PROJECT_UPPER___API int fn__PROJECT_SAFE__(void)
 {
-    InitXNotify();
-    ShowNotification(L"NexiaIDE DLL initialized!");
-    return 0; // S_OK
+	return 42;
 }
-
-DLL_EXPORT void MyLibraryShutdown(void)
-{
-    // Clean up resources
-}
-
-} // extern "C"
 ` },
                 ],
                 config: {
                     type: 'dll', template: 'dll',
                     sourceFiles: ['src/stdafx.cpp', 'src/__PROJECT__.cpp'],
-                    defines: ['_XBOX', 'BUILDING_DLL'],
+                    // <PROJECT>_EXPORTS, not BUILDING_DLL. The wizard's header
+                    // keys its export macro off this exact name, and it is
+                    // per-project on purpose: a title that links two DLLs would
+                    // otherwise define one shared symbol and flip both headers
+                    // to dllexport, in a project that exports neither.
+                    defines: ['_XBOX', '__PROJECT_UPPER___EXPORTS'],
                     // No xam.lib. There is no such import library in the XDK —
                     // linking one made every DLL project fail with LNK1181
-                    // before a line of user code was written. It is also not
-                    // needed: xam.xex exports by ordinal only, which is why the
-                    // code below resolves XNotifyQueueUI through GetModuleHandle
-                    // and GetProcAddress at runtime instead of importing it.
+                    // before a line of user code was written.
                     libraries: [],
                 },
             },
@@ -1324,8 +1337,22 @@ int MyLib_DoWork(const char* input, char* output, int outputSize)
         // Write template files, naming the entry point after the project the way
         // Visual Studio does.
         const fileName = safeFileName(name);
+        const safeName = createSafeName(name);
+
+        /**
+         * Substitute the wizard's three names.
+         *
+         * Longest first. __PROJECT__ cannot actually match inside
+         * __PROJECT_UPPER__ (the character after __PROJECT_ is a U, not a second
+         * underscore), but relying on that is one rename away from a token that
+         * quietly half-substitutes.
+         */
+        const expand = (text: string) => text
+            .replace(NAME_TOKEN_UPPER, safeName.toUpperCase())
+            .replace(NAME_TOKEN_SAFE, safeName)
+            .replace(NAME_TOKEN, fileName);
         for (const file of template.files) {
-            const rel = file.path.replace(NAME_TOKEN, fileName);
+            const rel = expand(file.path);
             const filePath = path.join(projectDir, rel);
 
             // safeFileName strips separators, so a substituted path cannot climb
@@ -1337,13 +1364,13 @@ int MyLib_DoWork(const char* input, char* output, int outputSize)
             }
 
             fs.mkdirSync(path.dirname(resolved), { recursive: true });
-            fs.writeFileSync(resolved, file.content.replace(NAME_TOKEN, fileName), 'utf-8');
+            fs.writeFileSync(resolved, expand(file.content), 'utf-8');
         }
 
         // Copy content out of the SDK (XUI's scene, skin and font). Already
         // verified to exist above, so a failure here is a real I/O problem.
         for (const c of sdkCopies) {
-            const dest = path.join(projectDir, c.to.replace(NAME_TOKEN, fileName));
+            const dest = path.join(projectDir, expand(c.to));
             fs.mkdirSync(path.dirname(dest), { recursive: true });
             fs.copyFileSync(c.src, dest);
         }
@@ -1354,14 +1381,14 @@ int MyLib_DoWork(const char* input, char* output, int outputSize)
             path: projectDir,
             type: template.config.type || 'executable',
             template: template.config.template || 'empty',
-            sourceFiles: (template.config.sourceFiles || []).map(f => f.replace(NAME_TOKEN, fileName)),
+            sourceFiles: (template.config.sourceFiles || []).map(expand),
             // A template's own include directories are kept, not replaced: this
             // used to hardcode ['include', 'src'], so static-lib's declared
             // 'include' was a no-op that happened to already be in the list.
             includeDirectories: Array.from(new Set(['include', 'src', ...(template.config.includeDirectories || [])])),
             libraryDirectories: [],
             libraries: template.config.libraries || [],
-            defines: template.config.defines || [],
+            defines: (template.config.defines || []).map(expand),
             configuration: 'Debug',
             pchHeader: 'stdafx.h',
         };
@@ -1376,7 +1403,7 @@ int MyLib_DoWork(const char* input, char* output, int outputSize)
         if (template.config.xuiContent) {
             const xc = template.config.xuiContent;
             config.xuiContent = {
-                package: xc.package.replace(NAME_TOKEN, fileName),
+                package: expand(xc.package),
                 scenes: [...xc.scenes],
                 copy: [...xc.copy],
             };
