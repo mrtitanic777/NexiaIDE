@@ -1138,6 +1138,13 @@ static int cmd_parse(int argc, wchar_t **argv)
     int ne = 0, nw = 0;
     args raw;
     memset(&raw, 0, sizeof raw);
+    /* "raw" is the filtered set — the lines worth surfacing as diagnostics.
+     * "all" is every line, which is a different thing and the caller needs
+     * both: runTool's `output` was the build log the Output panel shows, and it
+     * kept the compiler banner and the file-name echo that "raw" drops. Losing
+     * those would quietly empty the log for anyone reading a successful build. */
+    args all;
+    memset(&all, 0, sizeof all);
 
     /* runTool splits on '\n', trims each line and drops the blanks before any
      * pattern is tried, so '\r' never reaches a matcher. */
@@ -1147,6 +1154,10 @@ static int cmd_parse(int argc, wchar_t **argv)
         size_t len = wcslen(line);
         while (len && iswspace(line[len - 1])) line[--len] = 0;
         if (!len) continue;
+
+        /* parseLine appended to `output` here, before trying any pattern, so
+         * every line lands in `all` whether it matched or not. */
+        arg_push(&all, L"%ls", line);
 
         diag d;
         memset(&d, 0, sizeof d);
@@ -1177,6 +1188,8 @@ static int cmd_parse(int argc, wchar_t **argv)
     for (int i = 0; i < nw; i++) { if (i) printf(","); print_diag(&warns[i]); }
     printf("],\"raw\":");
     print_args(&raw);
+    printf(",\"output\":");
+    print_args(&all);
     printf("}\n");
     return 0;
 }

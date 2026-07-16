@@ -81,28 +81,27 @@ export class EmulatorManager {
     getGdbPath(): string { return this.gdbPath; }
 
     isConfigured(): boolean {
-        return !!this.emulatorPath && fs.existsSync(this.emulatorPath);
+        if (!this.emulatorPath) return false;
+        try {
+            const core = path.join(__dirname, '..', 'nexia-core.exe');
+            return !!JSON.parse(execFileSync(core, ['emulator', 'configured', this.emulatorPath],
+                { encoding: 'utf8', windowsHide: true })).configured;
+        } catch { return false; }
     }
 
     private findGdb(): string {
         if (this.gdbPath && fs.existsSync(this.gdbPath)) return this.gdbPath;
-
-        const candidates = [
-            'gdb', 'gdb.exe',
-            'C:\\msys64\\mingw64\\bin\\gdb.exe',
-            'C:\\msys64\\usr\\bin\\gdb.exe',
-            'C:\\mingw64\\bin\\gdb.exe',
-            'C:\\TDM-GCC-64\\bin\\gdb.exe',
-        ];
-
-        for (const c of candidates) {
-            try {
-                execSync(`"${c}" --version`, { stdio: 'pipe', windowsHide: true });
-                this.gdbPath = c;
-                return c;
-            } catch {}
-        }
-        return '';
+        // nexia-core probes the same candidates in the same order and returns
+        // the winner as written rather than resolved: the first candidate is a
+        // bare "gdb", and turning that into a full path would change which
+        // binary runs when PATH changes underneath us.
+        try {
+            const core = path.join(__dirname, '..', 'nexia-core.exe');
+            const res = JSON.parse(execFileSync(core, ['emulator', 'gdb'],
+                { encoding: 'utf8', windowsHide: true }));
+            this.gdbPath = res.path || '';
+            return this.gdbPath;
+        } catch { return ''; }
     }
 
     /**

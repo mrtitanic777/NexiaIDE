@@ -3,7 +3,6 @@
  * Handles project creation from templates, loading, and saving.
  */
 
-import { execFileSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { ProjectConfig, ProjectTemplate, FileNode } from '../shared/types';
@@ -1460,26 +1459,47 @@ int MyLib_DoWork(const char* input, char* output, int outputSize)
      */
     getFileTree(dirPath?: string): FileNode[] {
         const dir = dirPath || this.currentProject?.path;
-        if (!dir) return [];
-        // nexia-core walks it with FindFirstFile and sorts with CompareStringW,
-        // which is what localeCompare did here — "Ä" beside "A", not after "Z".
-        //
-        // This costs a process spawn the in-process scan did not: ~35 ms more on
-        // a 4,835-node tree, which is a third of a blink and larger than any real
-        // project. Not perceptible, and not a reason to keep a second
-        // implementation of the ignore rules and the sort alive in another
-        // language.
-        try {
-            const core = path.join(__dirname, '..', 'nexia-core.exe');
-            const res = JSON.parse(execFileSync(core, ['project', 'tree', dir],
-                { encoding: 'utf8', windowsHide: true, maxBuffer: 256 * 1024 * 1024 }));
-            return res.tree || [];
-        } catch {
-            // An unreadable or absent directory is an empty tree, as before: the
-            // IDE asks for one before a project is open.
-            return [];
-        }
+        if (!dir || !fs.existsSync(dir)) return [];
+
+        return this.readDirectory(dir);
     }
 
+    private readDirectory(dirPath: string): FileNode[] {
+        const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+        const nodes: FileNode[] = [];
 
+        // nexia.json is the project's own config: the IDE edits it through Project
+        // Properties, so showing it in the tree just invites hand-editing the file
+        // the IDE is actively writing. It stays on disk — only the tree hides it.
+        const ignored = new Set(['node_modules', '.git', 'out', '.vs', '__pycache__', PROJECT_FILE]);
+
+        for (const entry of entries) {
+            if (entry.name.startsWith('.') && entry.name !== '.gitignore') continue;
+            if (ignored.has(entry.name)) continue;
+
+            const fullPath = path.join(dirPath, entry.name);
+
+            if (entry.isDirectory()) {
+                nodes.push({
+                    name: entry.name,
+                    path: fullPath,
+                    isDirectory: true,
+                    children: this.readDirectory(fullPath),
+                });
+            } else {
+                nodes.push({
+                    name: entry.name,
+                    path: fullPath,
+                    isDirectory: false,
+                    extension: path.extname(entry.name).toLowerCase(),
+                });
+            }
+        }
+
+        return nodes.sort((a, b) => {
+            if (a.isDirectory && !b.isDirectory) return -1;
+            if (!a.isDirectory && b.isDirectory) return 1;
+            return a.name.localeCompare(b.name);
+        });
+    }
 }

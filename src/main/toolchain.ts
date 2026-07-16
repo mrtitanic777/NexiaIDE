@@ -103,22 +103,13 @@ export class Toolchain {
      */
     getToolPath(toolName: string): string | null {
         if (!this.sdkPaths) return null;
-
-        // Search in bin/win32 first, then bin directly
-        const searchDirs = [
-            this.sdkPaths.binWin32,
-            this.sdkPaths.binX64,
-            this.sdkPaths.bin,
-        ];
-
-        for (const dir of searchDirs) {
-            if (!fs.existsSync(dir)) continue;
-            const toolPath = path.join(dir, toolName);
-            if (fs.existsSync(toolPath)) return toolPath;
-            if (fs.existsSync(toolPath + '.exe')) return toolPath + '.exe';
-        }
-
-        return null;
+        // The search order — binwin32, then binwin64, then bin, each tried
+        // with and without .exe — lives in nexia-core now, not in two places.
+        try {
+            const res = JSON.parse(execFileSync(corePath(), ['sdk', 'tool', toolName, '--custom', this.sdkPaths.root],
+                { encoding: 'utf8', windowsHide: true }));
+            return res.path || null;
+        } catch { return null; }
     }
 
     /**

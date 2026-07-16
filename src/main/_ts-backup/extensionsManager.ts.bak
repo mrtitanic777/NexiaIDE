@@ -39,10 +39,10 @@ interface ExtensionsState {
 /**
  * nexia-core.exe — the filesystem half of extension management.
  *
- * The split: C enumerates and moves bytes, TypeScript parses. nexia-core never
- * reads a manifest's contents — it reports the path and this side parses it,
- * so there is no second JSON reader to disagree with JSON.parse about escapes
- * or duplicate keys on files the IDE did not author.
+ * Manifests stay here. A hand-rolled reader in C would have to agree with
+ * JSON.parse about escapes and duplicate keys on files the IDE did not author,
+ * and the first manifest it read differently would install under the wrong id.
+ * TypeScript parses; C moves the bytes.
  */
 function corePath(): string {
     return path.join(__dirname, '..', 'nexia-core.exe');
@@ -102,24 +102,30 @@ export class ExtensionManager {
      */
     getInstalled(): InstalledExtension[] {
         const results: InstalledExtension[] = [];
-        let found: any[];
-        try { found = core(['extensions', 'list']).extensions || []; }
-        catch (e) { console.error('Failed to scan extensions directory:', e); return results; }
-
-        for (const ext of found) {
-            try {
-                // ext.manifest is a path. nexia-core found it; JSON.parse reads it.
-                const manifest: ExtensionManifest = JSON.parse(fs.readFileSync(ext.manifest, 'utf-8'));
-                const stateEntry = this.state.extensions[manifest.id];
-                results.push({
-                    manifest,
-                    path: ext.path,
-                    enabled: stateEntry ? stateEntry.enabled : true,
-                    installedAt: stateEntry ? stateEntry.installedAt : new Date().toISOString(),
-                });
-            } catch (e) {
-                console.error(`Failed to parse manifest for extension "${ext.id}":`, e);
+        try {
+            const entries = fs.readdirSync(this.extensionsDir, { withFileTypes: true });
+            for (const entry of entries) {
+                if (!entry.isDirectory()) continue;
+                const extDir = path.join(this.extensionsDir, entry.name);
+                const manifestPath = path.join(extDir, 'manifest.json');
+                if (!fs.existsSync(manifestPath)) continue;
+                try {
+                    const manifest: ExtensionManifest = JSON.parse(
+                        fs.readFileSync(manifestPath, 'utf-8')
+                    );
+                    const stateEntry = this.state.extensions[manifest.id];
+                    results.push({
+                        manifest,
+                        path: extDir,
+                        enabled: stateEntry ? stateEntry.enabled : true,
+                        installedAt: stateEntry ? stateEntry.installedAt : new Date().toISOString(),
+                    });
+                } catch (e) {
+                    console.error(`Failed to parse manifest for extension "${entry.name}":`, e);
+                }
             }
+        } catch (e) {
+            console.error('Failed to scan extensions directory:', e);
         }
         return results.sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
     }
@@ -134,27 +140,36 @@ export class ExtensionManager {
             throw new Error('No manifest.json found in the selected folder.');
         }
 
-        // Parsed here so the id is known before the copy; nexia-core is told
-        // which id to install under rather than working it out itself.
-        const manifest: ExtensionManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+        const manifest: ExtensionManifest = JSON.parse(
+            fs.readFileSync(manifestPath, 'utf-8')
+        );
+
         if (!manifest.id || !manifest.name || !manifest.version) {
             throw new Error('Invalid manifest: requires id, name, and version fields.');
         }
 
-        const res = core(['extensions', 'install', folderPath, manifest.id]);
-        if (res.ok === false) throw new Error(res.error || 'Install failed.');
+        const destDir = path.join(this.extensionsDir, manifest.id);
 
+        // Remove existing if reinstalling
+        if (fs.existsSync(destDir)) {
+            fs.rmSync(destDir, { recursive: true, force: true });
+        }
+
+        // Copy folder
+        this.copyDir(folderPath, destDir);
+
+        // Update state
         this.state.extensions[manifest.id] = {
             enabled: true,
             installedAt: new Date().toISOString(),
         };
         this.saveState();
-        this.emit(`✅ Installed extension: ${manifest.name} v${manifest.version}
-`);
+
+        this.emit(`✅ Installed extension: ${manifest.name} v${manifest.version}\n`);
 
         return {
             manifest,
-            path: res.path,
+            path: destDir,
             enabled: true,
             installedAt: this.state.extensions[manifest.id].installedAt,
         };
@@ -232,8 +247,7 @@ export class ExtensionManager {
      * Get the extensions directory path.
      */
     getExtensionsDir(): string {
-        try { return core(['extensions', 'dir']).path; }
-        catch { return this.extensionsDir; }
+        return this.extensionsDir;
     }
 
     /**
@@ -248,26 +262,65 @@ export class ExtensionManager {
      * Create a new extension template.
      */
     createTemplate(name: string, type: ExtensionManifest['type']): string {
-        // nexia-core slugs the name and refuses the empty slug — a name with
-        // nothing alphanumeric in it ("!!!", an emoji) once resolved to the
-        // extensions root and scribbled manifest.json over it.
-        const res = core(['extensions', 'template', name, type]);
-        if (res.ok === false) {
-            throw new Error(`"${name}" has no letters or numbers in it, so it can't be turned into an extension id. ` +
+        const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+        // A name with nothing alphanumeric in it — "!!!", "___", an emoji —
+        // slugs to the empty string, and path.join(extensionsDir, '') is the
+        // extensions directory itself. That wrote manifest.json and README.md
+        // into the root of every extension, and the next createTemplate
+        // overwrote them. Refuse instead: there is no id here to install under.
+        if (!id) {
+            throw new Error(
+                `"${name}" has no letters or numbers in it, so it can't be turned into an extension id. ` +
                 `Give it a name with at least one letter or digit.`);
         }
 
-        this.state.extensions[res.id] = {
+        const extDir = path.join(this.extensionsDir, id);
+        fs.mkdirSync(extDir, { recursive: true });
+
+        const manifest: ExtensionManifest = {
+            id,
+            name,
+            version: '1.0.0',
+            author: 'Unknown',
+            description: `A ${type} extension for Nexia IDE.`,
+            type,
+            icon: this.getDefaultIcon(type),
+            tags: [type],
+        };
+
+        fs.writeFileSync(
+            path.join(extDir, 'manifest.json'),
+            JSON.stringify(manifest, null, 2)
+        );
+
+        // Create a README
+        fs.writeFileSync(
+            path.join(extDir, 'README.md'),
+            `# ${name}\n\n${manifest.description}\n\n## Installation\n\nImport this folder into Nexia IDE via the Extensions panel.\n`
+        );
+
+        this.state.extensions[id] = {
             enabled: true,
             installedAt: new Date().toISOString(),
         };
         this.saveState();
-        this.emit(`📦 Created extension template: ${name} at ${res.path}
-`);
-        return res.path;
+
+        this.emit(`📦 Created extension template: ${name} at ${extDir}\n`);
+        return extDir;
     }
 
-
+    private getDefaultIcon(type: string): string {
+        switch (type) {
+            case 'tool': return '🔧';
+            case 'template': return '📋';
+            case 'snippet': return '✂';
+            case 'theme': return '🎨';
+            case 'library': return '📚';
+            case 'plugin': return '🔌';
+            default: return '📦';
+        }
+    }
 
     private extractZip(zipPath: string, destDir: string): Promise<void> {
         return new Promise((resolve, reject) => {
@@ -284,5 +337,17 @@ export class ExtensionManager {
         });
     }
 
-
+    private copyDir(src: string, dest: string) {
+        fs.mkdirSync(dest, { recursive: true });
+        const entries = fs.readdirSync(src, { withFileTypes: true });
+        for (const entry of entries) {
+            const srcPath = path.join(src, entry.name);
+            const destPath = path.join(dest, entry.name);
+            if (entry.isDirectory()) {
+                this.copyDir(srcPath, destPath);
+            } else {
+                fs.copyFileSync(srcPath, destPath);
+            }
+        }
+    }
 }

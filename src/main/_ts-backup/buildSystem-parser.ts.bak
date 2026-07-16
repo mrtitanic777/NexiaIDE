@@ -4,13 +4,56 @@
  * Output format mirrors Visual Studio / MSBuild for Xbox 360.
  */
 
-import * as os from 'os';
-import { execFileSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { spawn, ChildProcess } from 'child_process';
 import { Toolchain } from './toolchain';
 import { BuildConfig, BuildResult, BuildMessage, ProjectConfig, BuildConfiguration } from '../shared/types';
+
+/**
+ * Decode what an SDK tool wrote to its pipe.
+ *
+ * Not Buffer.toString(), which assumes UTF-8. These tools are MSVC 2010 and
+ * emit the console's OEM code page. That is measurable rather than arguable:
+ * compile a file called "café.cpp" and cl.exe echoes the name back with 0x82
+ * where the é is — cp437. UTF-8 turns that byte into U+FFFD and the file name
+ * in the diagnostic no longer matches any file on disk.
+ *
+ * Everything ASCII decodes identically under every candidate, which is why this
+ * survived: it only breaks for people whose paths or identifiers aren't
+ * English, who are also the least likely to be believed when they report it.
+ *
+ * Node ships no cp437 decoder and none can be added — a dependency for one
+ * table is a poor trade — so the high half is spelled out. Other OEM pages (850
+ * in Western Europe, 932 in Japan) fall through to latin1, which is wrong but
+ * loses nothing: every byte survives as its own code point and can still be
+ * matched, where UTF-8 replaces it outright. nexia-core does this properly with
+ * GetConsoleOutputCP, and takes over when the C build driver lands.
+ */
+const CP437_HIGH =
+    'ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒ' +
+    'áíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐' +
+    '└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀' +
+    'αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ';
+
+let _consoleCp: number | null = null;
+function consoleCodePage(): number {
+    if (_consoleCp !== null) return _consoleCp;
+    try {
+        // chcp reports the console output code page — the one the child inherits.
+        const out = require('child_process').execSync('chcp.com', { encoding: 'utf8', windowsHide: true });
+        const m = /(\d+)/.exec(out);
+        _consoleCp = m ? parseInt(m[1], 10) : 0;
+    } catch { _consoleCp = 0; }
+    return _consoleCp!;
+}
+
+export function decodeToolOutput(data: Buffer): string {
+    if (consoleCodePage() !== 437) return data.toString('latin1');
+    let s = '';
+    for (const b of data) s += b < 0x80 ? String.fromCharCode(b) : CP437_HIGH[b - 0x80];
+    return s;
+}
 
 /**
  * The libraries/defines/paths that apply to the configuration being built.
@@ -1290,59 +1333,6 @@ export class BuildSystem {
      *        given, so its cwd determines the names stored in the archive and
      *        therefore the resource locators the title needs at runtime.
      */
-    /**
-     * Hand the tool's raw bytes to nexia-core and get back errors, warnings and
-     * the raw lines.
-     *
-     * Bytes, not a string: the decode is the C's to make. MSVC 2010 writes to
-     * the pipe in the console output page (cp437 on an English install, 850 in
-     * Western Europe, 932 in Japan), and nexia-core asks GetConsoleOutputCP
-     * rather than guessing. Decoding here first would throw away the only
-     * evidence of what page it was.
-     *
-     * Via a temp file because the output of a failing link can be megabytes and
-     * an argv cannot.
-     *
-     * contextFile is not passed down. The old parser used it only to name the
-     * file on an LNK diagnostic (`contextFile || 'LINK'`), and every caller that
-     * can produce one — link, lib, imagexex — passes '', so it always resolved
-     * to 'LINK', which is what nexia-core emits. compile() is the only caller
-     * with a non-empty contextFile and cl.exe does not emit LNK lines. It is
-     * still used below, where the exit-code and spawn-failure errors need a file
-     * to point at.
-     */
-    private parseToolOutput(raw: Buffer, contextFile: string):
-        { output: string; errors: BuildMessage[]; warnings: BuildMessage[]; rawLines: string[] } {
-        if (raw.length === 0) return { output: '', errors: [], warnings: [], rawLines: [] };
-        const tmp = path.join(os.tmpdir(), `nexia-tool-out-${process.pid}-${Date.now()}.txt`);
-        try {
-            fs.writeFileSync(tmp, raw);
-            const core = path.join(__dirname, '..', 'nexia-core.exe');
-            const res = JSON.parse(execFileSync(core, ['build', 'parse', tmp],
-                { encoding: 'utf8', windowsHide: true, maxBuffer: 256 * 1024 * 1024 }));
-            return {
-                // `output` is every line and feeds the Output panel; `raw` is the
-                // filtered subset. Two different things — the old parser kept both
-                // and so does this.
-                output: (res.output || []).join('\n') + ((res.output || []).length ? '\n' : ''),
-                errors: res.errors || [],
-                warnings: res.warnings || [],
-                rawLines: res.raw || [],
-            };
-        } catch (err: any) {
-            // A parse that fails must not swallow the build. Surface the bytes.
-            return {
-                output: '',
-                errors: [{ file: contextFile, line: 0, column: 0,
-                    message: `Could not parse tool output: ${err.message}`, severity: 'error' }],
-                warnings: [],
-                rawLines: [],
-            };
-        } finally {
-            try { fs.unlinkSync(tmp); } catch {}
-        }
-    }
-
     private runTool(toolPath: string, args: string[], contextFile: string, cwd?: string): Promise<{ output: string; errors: BuildMessage[]; warnings: BuildMessage[]; rawLines: string[] }> {
         return new Promise((resolve) => {
             const env = this.toolchain.getToolEnvironment();
@@ -1367,18 +1357,85 @@ export class BuildSystem {
 
             this.currentProcess = proc;
             let output = '';
-            // Raw bytes, undecoded. nexia-core does the code-page decode and the
-            // parse together, because the two are one decision: the bytes MSVC
-            // writes are in the console output page, and deciding that in one place
-            // is why a "café.cpp" diagnostic survives to name a file on disk.
-            const chunks: Buffer[] = [];
-            proc.stdout?.on('data', (d: Buffer) => { chunks.push(Buffer.from(d)); });
-            proc.stderr?.on('data', (d: Buffer) => { chunks.push(Buffer.from(d)); });
+            const errors: BuildMessage[] = [];
+            const warnings: BuildMessage[] = [];
+            const rawLines: string[] = [];
+
+            const parseLine = (line: string) => {
+                output += line + '\n';
+
+                // MSVC error format: file(line): error Cxxxx: message
+                const match = line.match(/^(.+?)\((\d+)\)\s*:\s*(error|warning)\s+(\w+)\s*:\s*(.+)/i);
+                if (match) {
+                    const msg: BuildMessage = {
+                        file: match[1],
+                        line: parseInt(match[2]),
+                        column: 0,
+                        message: `${match[4]}: ${match[5]}`,
+                        severity: match[3].toLowerCase() as 'error' | 'warning',
+                    };
+                    if (msg.severity === 'error') errors.push(msg);
+                    else warnings.push(msg);
+                    rawLines.push(line);
+                    return;
+                }
+
+                // Linker error: LINK : fatal error LNKxxxx: message
+                const linkMatch = line.match(/LINK\s*:\s*(fatal\s+error|error|warning)\s+(\w+)\s*:\s*(.+)/i);
+                if (linkMatch) {
+                    const severity = linkMatch[1].toLowerCase().includes('error') ? 'error' : 'warning';
+                    const msg: BuildMessage = {
+                        file: contextFile || 'LINK',
+                        line: 0, column: 0,
+                        message: `${linkMatch[2]}: ${linkMatch[3]}`,
+                        severity: severity as 'error' | 'warning',
+                    };
+                    if (severity === 'error') errors.push(msg);
+                    else warnings.push(msg);
+                    rawLines.push(line);
+                    return;
+                }
+
+                // Unresolved external
+                const unresolved = line.match(/error\s+(LNK\d+)\s*:\s*(.+)/i);
+                if (unresolved) {
+                    errors.push({
+                        file: contextFile || 'LINK', line: 0, column: 0,
+                        message: `${unresolved[1]}: ${unresolved[2]}`,
+                        severity: 'error',
+                    });
+                    rawLines.push(line);
+                    return;
+                }
+
+                // Skip nologo/blank lines, only collect meaningful tool output
+                // Also skip cl.exe filename echo (just the bare source filename)
+                if (line.trim() && !line.match(/^Microsoft|^Copyright|^\s*$/) && !line.match(/^\w+\.(cpp|c|cc|cxx|obj|h)$/i)) {
+                    rawLines.push(line);
+                }
+            };
+
+            /*
+             * decodeToolOutput, not data.toString().
+             *
+             * Buffer.toString() decodes as UTF-8. The SDK's tools are MSVC 2010
+             * and write to a pipe in the console's code page — 437 or 1252 on an
+             * English install, something else elsewhere — so any diagnostic
+             * quoting a non-ASCII identifier or path came through mangled, and
+             * the file name in it could no longer be matched to a file on disk.
+             * Anything ASCII was unaffected, which is why this survived: it only
+             * breaks for the users least able to report it.
+             */
+            proc.stdout?.on('data', (data) => {
+                decodeToolOutput(data).split('\n').forEach((l: string) => { if (l.trim()) parseLine(l.trim()); });
+            });
+
+            proc.stderr?.on('data', (data) => {
+                decodeToolOutput(data).split('\n').forEach((l: string) => { if (l.trim()) parseLine(l.trim()); });
+            });
+
             proc.on('close', (code) => {
                 this.currentProcess = null;
-                const parsed = this.parseToolOutput(Buffer.concat(chunks), contextFile);
-                const errors = parsed.errors, warnings = parsed.warnings, rawLines = parsed.rawLines;
-                output = parsed.output;
                 // If process exited with error code but we didn't parse any errors,
                 // add a generic error
                 if (code && code !== 0 && errors.length === 0) {
@@ -1400,7 +1457,6 @@ export class BuildSystem {
 
             proc.on('error', (err) => {
                 this.currentProcess = null;
-                const errors: BuildMessage[] = [], warnings: BuildMessage[] = [], rawLines: string[] = [];
                 errors.push({
                     file: contextFile, line: 0, column: 0,
                     message: `Cannot execute ${path.basename(toolPath)}: ${err.message}`,
