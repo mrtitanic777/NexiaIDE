@@ -40,8 +40,9 @@ function run(tool, args, label) {
     }
 }
 
+const IMGUI = 'nexia-ui/third_party/imgui';
 const cFlags = ['-O2', '-std=c11', '-Icore'];
-const cxxFlags = ['-O2', '-std=c++17', '-Icore'];
+const cxxFlags = ['-O2', '-std=c++17', '-Icore', `-I${IMGUI}`, `-I${IMGUI}/backends`];
 
 // core C the UI reuses (the JSON reader + its string helpers)
 const cObjs = [];
@@ -51,15 +52,29 @@ for (const src of ['core/json_parse.c', 'core/util.c']) {
     cObjs.push(o);
 }
 
+// Dear ImGui (vendored, pinned v1.90.9) + the DX9/Win32 backends
+const cppObjs = [];
+const imguiSrc = [
+    `${IMGUI}/imgui.cpp`, `${IMGUI}/imgui_draw.cpp`, `${IMGUI}/imgui_tables.cpp`,
+    `${IMGUI}/imgui_widgets.cpp`,
+    `${IMGUI}/backends/imgui_impl_win32.cpp`, `${IMGUI}/backends/imgui_impl_dx9.cpp`,
+];
+for (const src of imguiSrc) {
+    const o = path.join(OBJ, 'imgui_' + path.basename(src).replace(/\.cpp$/, '.o'));
+    run(GXX, ['-c', ...cxxFlags, src, '-o', o], `compile ${src}`);
+    cppObjs.push(o);
+}
+
 // the UI itself
 const uiObj = path.join(OBJ, 'main.o');
 run(GXX, ['-c', ...cxxFlags, 'nexia-ui/main.cpp', '-o', uiObj], 'compile nexia-ui/main.cpp');
+cppObjs.push(uiObj);
 
 // link (static so it ships as one exe; console subsystem for now so --probe works)
 run(GXX, [
-    uiObj, ...cObjs, '-o', OUT,
+    ...cppObjs, ...cObjs, '-o', OUT,
     '-static', '-static-libgcc', '-static-libstdc++',
-    '-luser32', '-lgdi32',
+    '-ld3d9', '-luser32', '-lgdi32', '-ldwmapi',
 ], 'link nexia-ui.exe');
 
 const kb = Math.round(fs.statSync(OUT).size / 1024);
