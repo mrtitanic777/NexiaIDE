@@ -14,3 +14,4 @@ Delete a file here once its C counterpart has survived a release.
 | file | replaced by | proven by |
 |---|---|---|
 | `toolchain.ts.bak` | `core/toolchain.c` | `core/test/toolchain-parity.js`, `env-parity.js` |
+| `parseXex.ts.bak` | `core/xex.c` | `core/test/xex-parity.js` — which compares against this file, so deleting it retires the test |

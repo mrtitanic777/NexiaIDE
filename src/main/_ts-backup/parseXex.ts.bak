@@ -1,0 +1,264 @@
+/**
+ * parseXex + formatBytes — the last TypeScript version, kept for reference.
+ *
+ * Superseded by core/xex.c, which core/test/xex-parity.js proves emits the same
+ * structure byte for byte against a real XEX. This is not imported by anything
+ * and is not a fallback; it is here so a human can restore it deliberately if
+ * the C turns out wrong on a machine that isn't this one, and so the parity test
+ * has something real to compare against until then.
+ *
+ * Lifted verbatim from src/main/main.ts. Do not edit.
+ */
+import * as path from 'path';
+
+function formatBytes(bytes: number): string {
+    if (bytes === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+    const val = bytes / Math.pow(1024, i);
+    return `${val < 10 ? val.toFixed(2) : val < 100 ? val.toFixed(1) : Math.round(val)} ${units[i]}`;
+}
+
+function parseXex(buf: Buffer, filePath: string): any {
+    const result: any = {
+        filePath,
+        fileName: path.basename(filePath),
+        fileSize: buf.length,
+        fileSizeFormatted: formatBytes(buf.length),
+        valid: false,
+        error: null,
+        header: {} as any,
+        securityInfo: {} as any,
+        optionalHeaders: [] as any[],
+        sections: [] as any[],
+        imports: [] as any[],
+        resources: [] as any[],
+        executionInfo: {} as any,
+    };
+
+    // XEX2 magic: "XEX2" at offset 0
+    if (buf.length < 24) {
+        result.error = 'File too small to be a valid XEX';
+        return result;
+    }
+
+    const magic = buf.toString('ascii', 0, 4);
+    if (magic !== 'XEX2' && magic !== 'XEX1' && magic !== 'XEX\0') {
+        result.error = `Invalid magic: "${magic}" (expected "XEX2")`;
+        return result;
+    }
+
+    result.valid = true;
+    result.header.magic = magic;
+
+    // XEX2 Header (Big Endian — Xbox 360 is PowerPC BE)
+    result.header.moduleFlags = buf.readUInt32BE(4);
+    result.header.peDataOffset = buf.readUInt32BE(8);
+    result.header.reserved = buf.readUInt32BE(12);
+    result.header.securityInfoOffset = buf.readUInt32BE(16);
+    result.header.optionalHeaderCount = buf.readUInt32BE(20);
+
+    // Decode module flags
+    const flags = result.header.moduleFlags;
+    result.header.moduleFlagsDecoded = [];
+    if (flags & 0x00000001) result.header.moduleFlagsDecoded.push('TITLE_MODULE');
+    if (flags & 0x00000002) result.header.moduleFlagsDecoded.push('EXPORTS_TO_TITLE');
+    if (flags & 0x00000004) result.header.moduleFlagsDecoded.push('SYSTEM_DEBUGGER');
+    if (flags & 0x00000008) result.header.moduleFlagsDecoded.push('DLL_MODULE');
+    if (flags & 0x00000010) result.header.moduleFlagsDecoded.push('MODULE_PATCH');
+    if (flags & 0x00000020) result.header.moduleFlagsDecoded.push('PATCH_FULL');
+    if (flags & 0x00000040) result.header.moduleFlagsDecoded.push('PATCH_DELTA');
+    if (flags & 0x00000080) result.header.moduleFlagsDecoded.push('USER_MODE');
+
+    // Parse optional headers
+    let offset = 24;
+    const knownHeaders: Record<number, string> = {
+        0x000002FF: 'Resource Info',
+        0x000003FF: 'Base File Format',
+        0x000005FF: 'Delta Patch Descriptor',
+        0x00008001: 'Bounding Path',
+        0x00008105: 'Device ID',
+        0x000080FF: 'Original Base Address',
+        0x00008102: 'Entry Point',
+        0x00008103: 'Image Base Address',
+        0x00008104: 'Import Libraries',
+        0x000100FF: 'Checksum Timestamp',
+        0x000101FF: 'Enabled For Callcap',
+        0x000102FF: 'Enabled For Fastcap',
+        0x000103FF: 'Original PE Name',
+        0x00018002: 'Static Libraries',
+        0x000183FF: 'TLS Info',
+        0x000200FF: 'Default Stack Size',
+        0x000201FF: 'Default Filesystem Cache Size',
+        0x000300FF: 'Default Heap Size',
+        0x00040006: 'System Flags',
+        0x000400FF: 'Execution Info',
+        0x000401FF: 'Service ID List',
+        0x000402FF: 'Title Workspace Size',
+        0x000403FF: 'Game Ratings',
+        0x000405FF: 'LAN Key',
+        0x000406FF: 'Xbox 360 Logo',
+        0x000407FF: 'Multidisc Media IDs',
+        0x000408FF: 'Alternate Title IDs',
+        0x000409FF: 'Additional Title Memory',
+        0x0004050B: 'Export Table',
+    };
+
+    for (let i = 0; i < result.header.optionalHeaderCount && offset + 8 <= buf.length; i++) {
+        const headerId = buf.readUInt32BE(offset);
+        const headerData = buf.readUInt32BE(offset + 4);
+        const headerName = knownHeaders[headerId] || `Unknown (0x${headerId.toString(16).padStart(8, '0')})`;
+
+        const entry: any = {
+            id: headerId,
+            idHex: '0x' + headerId.toString(16).padStart(8, '0'),
+            name: headerName,
+            dataOrOffset: headerData,
+            dataHex: '0x' + headerData.toString(16).padStart(8, '0'),
+        };
+
+        // Extract specific header data
+        if (headerId === 0x00008102 /* Entry Point */) {
+            result.executionInfo.entryPoint = '0x' + headerData.toString(16).padStart(8, '0');
+        } else if (headerId === 0x00008103 /* Image Base Address */) {
+            result.executionInfo.imageBaseAddress = '0x' + headerData.toString(16).padStart(8, '0');
+        } else if (headerId === 0x000080FF /* Original Base Address */) {
+            result.executionInfo.originalBaseAddress = '0x' + headerData.toString(16).padStart(8, '0');
+        } else if (headerId === 0x000200FF /* Default Stack Size */) {
+            entry.value = headerData;
+            entry.valueFormatted = formatBytes(headerData);
+        } else if (headerId === 0x000300FF /* Default Heap Size */) {
+            entry.value = headerData;
+            entry.valueFormatted = formatBytes(headerData);
+        } else if (headerId === 0x000103FF /* Original PE Name */) {
+            // Points to offset containing the name string
+            if (headerData > 0 && headerData + 4 < buf.length) {
+                const nameLen = buf.readUInt32BE(headerData);
+                if (nameLen > 0 && nameLen < 256 && headerData + 4 + nameLen <= buf.length) {
+                    entry.value = buf.toString('ascii', headerData + 4, headerData + 4 + nameLen).replace(/\0/g, '');
+                    result.header.originalPeName = entry.value;
+                }
+            }
+        } else if (headerId === 0x000400FF /* Execution Info */ && headerData + 24 <= buf.length) {
+            try {
+                result.executionInfo.mediaId = '0x' + buf.readUInt32BE(headerData).toString(16).padStart(8, '0');
+                result.executionInfo.version = `${buf.readUInt8(headerData + 4)}.${buf.readUInt8(headerData + 5)}.${buf.readUInt16BE(headerData + 6)}.${buf.readUInt8(headerData + 8)}`;
+                result.executionInfo.baseVersion = `${buf.readUInt8(headerData + 9)}.${buf.readUInt8(headerData + 10)}.${buf.readUInt16BE(headerData + 11)}.${buf.readUInt8(headerData + 13)}`;
+                result.executionInfo.titleId = '0x' + buf.readUInt32BE(headerData + 14).toString(16).padStart(8, '0');
+                result.executionInfo.platform = buf.readUInt8(headerData + 18);
+                result.executionInfo.executableType = buf.readUInt8(headerData + 19);
+                result.executionInfo.discNumber = buf.readUInt8(headerData + 20);
+                result.executionInfo.discCount = buf.readUInt8(headerData + 21);
+            } catch {}
+        } else if (headerId === 0x00008104 /* Import Libraries */ && headerData + 8 <= buf.length) {
+            try {
+                const nameTableSize = buf.readUInt32BE(headerData);
+                const importCount = buf.readUInt32BE(headerData + 4);
+                // Parse library name table
+                let nameOffset = headerData + 8;
+                const names: string[] = [];
+                for (let n = 0; n < 16 && nameOffset < headerData + 8 + nameTableSize; n++) {
+                    const end = buf.indexOf(0, nameOffset);
+                    if (end <= nameOffset || end > headerData + 8 + nameTableSize) break;
+                    const name = buf.toString('ascii', nameOffset, end);
+                    if (name.length > 0) names.push(name);
+                    nameOffset = end + 1;
+                    // Skip padding
+                    while (nameOffset < headerData + 8 + nameTableSize && buf[nameOffset] === 0) nameOffset++;
+                }
+                for (const name of names) {
+                    result.imports.push({ library: name, functions: [] });
+                }
+                entry.value = `${names.length} libraries, ${importCount} total imports`;
+                entry.libraries = names;
+            } catch {}
+        } else if (headerId === 0x000002FF /* Resource Info */ && headerData + 4 <= buf.length) {
+            try {
+                const resSize = buf.readUInt32BE(headerData);
+                const resCount = Math.floor(resSize / 16);
+                for (let r = 0; r < resCount && headerData + 4 + (r + 1) * 16 <= buf.length; r++) {
+                    const resOff = headerData + 4 + r * 16;
+                    const resName = buf.toString('ascii', resOff, resOff + 8).replace(/\0/g, '');
+                    const resAddr = buf.readUInt32BE(resOff + 8);
+                    const resLen = buf.readUInt32BE(resOff + 12);
+                    result.resources.push({
+                        name: resName,
+                        address: '0x' + resAddr.toString(16).padStart(8, '0'),
+                        size: resLen,
+                        sizeFormatted: formatBytes(resLen),
+                    });
+                }
+            } catch {}
+        }
+
+        result.optionalHeaders.push(entry);
+        offset += 8;
+    }
+
+    // Parse security info
+    const secOff = result.header.securityInfoOffset;
+    if (secOff > 0 && secOff + 296 <= buf.length) {
+        try {
+            result.securityInfo.headerSize = buf.readUInt32BE(secOff);
+            result.securityInfo.imageSize = buf.readUInt32BE(secOff + 4);
+            result.securityInfo.imageSizeFormatted = formatBytes(buf.readUInt32BE(secOff + 4));
+
+            // PE headers inside the XEX
+            const peOff = result.header.peDataOffset;
+            if (peOff > 0 && peOff + 0x100 < buf.length) {
+                // Check for PE signature
+                const peMagic = buf.toString('ascii', peOff, peOff + 2);
+                if (peMagic === 'MZ') {
+                    const peHeaderOff = buf.readUInt32LE(peOff + 0x3C);
+                    const absOff = peOff + peHeaderOff;
+                    if (absOff + 4 <= buf.length && buf.toString('ascii', absOff, absOff + 4) === 'PE\0\0') {
+                        // COFF header
+                        const numSections = buf.readUInt16LE(absOff + 6);
+                        const timeDateStamp = buf.readUInt32LE(absOff + 8);
+                        result.header.peTimestamp = new Date(timeDateStamp * 1000).toISOString();
+                        result.header.peSectionCount = numSections;
+
+                        // Optional header size
+                        const optHeaderSize = buf.readUInt16LE(absOff + 20);
+                        const sectionTableOff = absOff + 24 + optHeaderSize;
+
+                        // Parse sections
+                        for (let s = 0; s < numSections && sectionTableOff + (s + 1) * 40 <= buf.length; s++) {
+                            const sOff = sectionTableOff + s * 40;
+                            const secName = buf.toString('ascii', sOff, sOff + 8).replace(/\0/g, '');
+                            const virtualSize = buf.readUInt32LE(sOff + 8);
+                            const virtualAddr = buf.readUInt32LE(sOff + 12);
+                            const rawSize = buf.readUInt32LE(sOff + 16);
+                            const rawPtr = buf.readUInt32LE(sOff + 20);
+                            const chars = buf.readUInt32LE(sOff + 36);
+
+                            const charFlags: string[] = [];
+                            if (chars & 0x00000020) charFlags.push('CODE');
+                            if (chars & 0x00000040) charFlags.push('INITIALIZED_DATA');
+                            if (chars & 0x00000080) charFlags.push('UNINITIALIZED_DATA');
+                            if (chars & 0x20000000) charFlags.push('EXECUTE');
+                            if (chars & 0x40000000) charFlags.push('READ');
+                            if (chars & 0x80000000) charFlags.push('WRITE');
+
+                            result.sections.push({
+                                name: secName,
+                                virtualSize,
+                                virtualSizeFormatted: formatBytes(virtualSize),
+                                virtualAddress: '0x' + virtualAddr.toString(16).padStart(8, '0'),
+                                rawDataSize: rawSize,
+                                rawDataSizeFormatted: formatBytes(rawSize),
+                                rawDataPointer: '0x' + rawPtr.toString(16).padStart(8, '0'),
+                                characteristics: charFlags,
+                                characteristicsRaw: '0x' + (chars >>> 0).toString(16).padStart(8, '0'),
+                            });
+                        }
+                    }
+                }
+            }
+        } catch {}
+    }
+
+    return result;
+}
+
+export { parseXex, formatBytes };

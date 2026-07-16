@@ -12,21 +12,32 @@
 const path = require('path'), fs = require('fs'), { execFileSync } = require('child_process');
 const R = process.cwd();
 
-// Pull parseXex + formatBytes out of the compiled main.js without loading Electron.
-const mainJs = fs.readFileSync(path.join(R, 'dist', 'main', 'main.js'), 'utf8');
-const grab = (name) => {
-    const at = mainJs.indexOf(`function ${name}(`);
-    if (at < 0) throw new Error(`${name} not found in dist/main/main.js`);
-    let depth = 0, i = mainJs.indexOf('{', at);
-    for (let j = i; j < mainJs.length; j++) {
-        if (mainJs[j] === '{') depth++;
-        else if (mainJs[j] === '}' && --depth === 0) return mainJs.slice(at, j + 1);
-    }
-    throw new Error(`${name}: unbalanced braces`);
-};
-const sandbox = { path, require };
-new Function('path', 'require', grab('formatBytes') + '\n' + grab('parseXex') +
-             '\nthis.parseXex = parseXex;').call(sandbox, path, require);
+// parseXex is gone from main.ts — the handler calls nexia-core now. The last
+// TypeScript version lives in src/main/_ts-backup/parseXex.ts.bak, and this
+// compares against that: a port is only proven while the thing it replaced is
+// still around to disagree with it. When the backup is deleted this test loses
+// its reference and should go with it, having done its job.
+//
+// The .bak is TypeScript, so tsc strips the types — the same tsc the build uses,
+// already a devDependency. Doing it with regexes was a temptation and a trap:
+// the stripping drifts from the language, and then the test fails for reasons
+// with nothing to do with the parser.
+const BAK = path.join(R, 'src', 'main', '_ts-backup', 'parseXex.ts.bak');
+if (!fs.existsSync(BAK)) {
+    console.log('  _ts-backup/parseXex.ts.bak is gone - nothing left to compare against.');
+    console.log('  Delete this test: the C is the only implementation now.');
+    process.exit(0);
+}
+const tsc = require(path.join(R, 'node_modules', 'typescript'));
+const js = tsc.transpileModule(fs.readFileSync(BAK, 'utf8'), {
+    compilerOptions: { module: tsc.ModuleKind.CommonJS, target: tsc.ScriptTarget.ES2020 },
+}).outputText;
+// The transpiled output declares its own `path` from the .bak's import, so it
+// gets require and nothing else — passing a `path` parameter as well would
+// collide with the const tsc emits.
+const sandbox = { exports: {}, module: { exports: {} } };
+new Function('require', 'exports', 'module', js + ';this.parseXex = parseXex;')
+    .call(sandbox, require, sandbox.exports, sandbox.module);
 
 const files = [];
 const sdkSample = path.join('C:', 'Program Files (x86)', 'Microsoft Xbox 360 SDK',
