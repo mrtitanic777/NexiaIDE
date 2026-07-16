@@ -1273,9 +1273,50 @@ int MyLib_DoWork(const char* input, char* output, int outputSize)
     }
 
     /**
+     * Run a nexia-core `project` command and return its parsed JSON.
+     *
+     * nexia-core reports a refusal as {ok:false,error} on stdout and exits
+     * non-zero, so the error arrives where execFileSync throws — the stdout on
+     * the thrown error is the answer, not noise. A genuinely broken spawn (the
+     * binary missing) has no stdout, and that rethrows.
+     */
+    private core(args: string[]): any {
+        const exe = path.join(__dirname, '..', 'nexia-core.exe');
+        let out: string;
+        try {
+            out = execFileSync(exe, args, { encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
+        } catch (err: any) {
+            out = err?.stdout?.toString() || '';
+            if (!out) throw err;
+        }
+        const res = JSON.parse(out);
+        if (!res.ok) throw new Error(res.error || 'nexia-core refused the request');
+        return res;
+    }
+
+    /**
      * Create a new project from a template.
+     *
+     * The whole of this — the template table, the token substitution, the
+     * sdkFiles copy out of the user's XDK, refusing a non-empty folder, and
+     * writing nexia.json — is core/project.c now, proven byte-identical by
+     * create-parity.js. What was ~145 lines of TypeScript is the spawn below;
+     * the old body is in _ts-backup/projectManager.ts.bak, and the C's message
+     * for a missing SDK asset or an occupied directory is the same string this
+     * used to throw.
      */
     async create(name: string, directory: string, templateId: string): Promise<ProjectConfig> {
+        const args = ['project', 'create', name, directory, templateId];
+        const sdk = this.toolchain?.getPaths();
+        if (sdk?.root) args.push('--sdk', sdk.root);
+        const res = this.core(args);
+        // open() reads the nexia.json the C just wrote, sets currentProject and
+        // returns the config — so create composes from open rather than parsing
+        // the file a second way.
+        return this.open(res.path);
+    }
+
+    private async createRetired(name: string, directory: string, templateId: string): Promise<ProjectConfig> {
         const template = this.getTemplates().find(t => t.id === templateId);
         if (!template) throw new Error(`Template '${templateId}' not found`);
 
@@ -1423,24 +1464,29 @@ int MyLib_DoWork(const char* input, char* output, int outputSize)
 
     /**
      * Open an existing project.
+     *
+     * core/project.c reads the nexia.json, overrides `path` with where the
+     * project was actually found (so a moved project still opens) and hands back
+     * the whole config — every field, including the ones Project Properties and
+     * the VS importer stored that nothing here names. The missing-file message is
+     * the same string this used to throw. Proven by create-parity.js.
      */
     async open(projectDir: string): Promise<ProjectConfig> {
-        const configPath = path.join(projectDir, PROJECT_FILE);
-
-        if (!fs.existsSync(configPath)) {
-            throw new Error(`No ${PROJECT_FILE} found in ${projectDir}`);
-        }
-
-        const raw = fs.readFileSync(configPath, 'utf-8');
-        const config: ProjectConfig = JSON.parse(raw);
-        config.path = projectDir;
-
+        const config: ProjectConfig = this.core(['project', 'open', projectDir]).project;
         this.currentProject = config;
         return config;
     }
 
     /**
      * Save the current project configuration.
+     *
+     * Left as JSON.stringify deliberately, not routed through `nexia-core project
+     * save`. The C writer (jv_write) is proven byte-identical to this exact call,
+     * so it would produce the same nexia.json — but only after this serialised
+     * the object to a temp file for the C to read and rewrite, two serialisations
+     * for one result. The C save earns its place when the config lives in C
+     * rather than in this process; while a JS object holds it, this is the same
+     * bytes with none of the round trip.
      */
     async save(config?: ProjectConfig): Promise<void> {
         const project = config || this.currentProject;
