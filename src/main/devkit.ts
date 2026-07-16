@@ -4,7 +4,7 @@
  * Communicates via XBDM (Xbox Debug Monitor) on port 730.
  */
 
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
 import * as path from 'path';
 import * as net from 'net';
 import { spawn } from 'child_process';
@@ -32,10 +32,34 @@ function corePath(): string {
     return path.join(__dirname, '..', 'nexia-core.exe');
 }
 
-function core(args: string[]): any {
-    const out = execFileSync(corePath(), args, { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
-    return JSON.parse(out);
+/*
+ * Async, and that is not a style preference.
+ *
+ * execFileSync blocks the event loop until the child exits, and every one of
+ * these waits on a console over the network — up to the full XBDM timeout when
+ * it is unreachable. Doing that synchronously in Electron's main process freezes
+ * the whole IDE: no window, no menus, no way to cancel, for as long as the
+ * console stays silent. The sockets this replaced were async for exactly that
+ * reason, and making them synchronous on the way to C would have traded a
+ * working IDE for a tidier call site.
+ *
+ * nexia-core exits non-zero when the console refuses, so the JSON on stdout is
+ * parsed before the exit code is judged: a refusal is an answer, not a crash.
+ */
+function core(args: string[]): Promise<any> {
+    return new Promise((resolve, reject) => {
+        execFile(corePath(), args,
+            { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 },
+            (err, stdout) => {
+                if (stdout) {
+                    try { return resolve(JSON.parse(stdout)); } catch {}
+                }
+                reject(err || new Error('nexia-core emitted no JSON'));
+            });
+    });
 }
+
+
 export class DevkitManager {
     private toolchain: Toolchain;
     private consoles: DevkitConfig[] = [];
@@ -87,7 +111,7 @@ export class DevkitManager {
         this.emit(`\nConnecting to ${ip}:${XBDM_PORT}...\n`);
         let res: any;
         try {
-            res = core(['devkit', 'connect', ip]);
+            res = await core(['devkit', 'connect', ip]);
         } catch (err: any) {
             this.connectedIp = null;
             this.emit(`✗ Connection failed: ${err.message}\n`);
@@ -120,11 +144,13 @@ export class DevkitManager {
     async listVolumes(ip?: string): Promise<string[]> {
         const target = ip || this.connectedIp;
         if (!target) return [];
-        try {
-            return core(['devkit', 'volumes', target]).volumes || [];
-        } catch {
-            return [];
-        }
+        // Rejects when the console can't be reached, as the socket version did:
+        // it had socket.on('error', err => reject(err)). Swallowing that into an
+        // empty list would turn "I couldn't reach your devkit" into "your devkit
+        // has no drives", which is a worse lie than an error.
+        const res = await core(['devkit', 'volumes', target]);
+        if (res.ok === false) throw new Error(res.error || 'drivelist failed');
+        return res.volumes || [];
     }
 
     /**
@@ -133,11 +159,10 @@ export class DevkitManager {
     async getSystemInfo(ip?: string): Promise<Record<string, string>> {
         const target = ip || this.connectedIp;
         if (!target) return {};
-        try {
-            return core(['devkit', 'sysinfo', target]).info || {};
-        } catch {
-            return {};
-        }
+        // Rejects on failure, as before — see listVolumes.
+        const res = await core(['devkit', 'sysinfo', target]);
+        if (res.ok === false) throw new Error(res.error || 'systeminfo failed');
+        return res.info || {};
     }
 
     /**
@@ -303,12 +328,10 @@ export class DevkitManager {
     async listFiles(remotePath: string, ip?: string): Promise<string> {
         const target = ip || this.connectedIp;
         if (!target) return '';
-        try {
-            const res = core(['devkit', 'ls', target, remotePath]);
-            return Array.isArray(res.files) ? res.files.join('\n') : (res.raw || '');
-        } catch (err: any) {
-            return `Error: ${err.message}`;
-        }
+        // Rejects on failure, as before.
+        const res = await core(['devkit', 'ls', target, remotePath]);
+        if (res.ok === false) throw new Error(res.error || 'dirlist failed');
+        return Array.isArray(res.files) ? res.files.join('\n') : (res.raw || '');
     }
 
     /**
