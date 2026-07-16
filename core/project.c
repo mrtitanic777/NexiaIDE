@@ -16,6 +16,107 @@
 
 #define PROJECT_FILE L"nexia.json"
 
+/* ── the wizard's two names ───────────────────────────────────────────────────
+ *
+ * Both of these turn a project name typed into a text box into something safe.
+ * They are `create`'s foundation, ported ahead of it: every template path, every
+ * substituted identifier and the project directory itself come out of these two
+ * functions, so a disagreement here is a disagreement about where files land.
+ */
+
+/*
+ * Visual Studio's CreateSafeName, reproduced exactly.
+ *
+ * From VC#\VC#Wizards\1033\common.js: keep only [A-Za-z0-9_], prepend "My" if
+ * the result is empty or starts with a digit, because an identifier cannot begin
+ * with one. "3D Engine" becomes My3DEngine, which is what the wizard would have
+ * called it.
+ *
+ * The TypeScript iterates `for (const ch of name)`, which walks code points, not
+ * UTF-16 units. Walking wchar_t here walks units, and for a character outside the
+ * BMP that is two surrogates instead of one code point. It makes no difference:
+ * the filter keeps only ASCII, and both halves of a surrogate pair fail that test
+ * exactly as the single code point would. It would matter the moment this filter
+ * accepted anything above 0x7f, so it is written down rather than relied upon.
+ */
+void nx_safe_name(const wchar_t *name, wchar_t *out, size_t cap)
+{
+    size_t n = 0;
+    for (const wchar_t *p = name; *p && n + 1 < cap; p++) {
+        wchar_t c = *p;
+        if ((c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') ||
+            c == L'_' || (c >= L'0' && c <= L'9'))
+            out[n++] = c;
+    }
+    out[n] = 0;
+
+    if (n == 0) { nx_copy(out, cap, L"My"); return; }
+    if (out[0] >= L'0' && out[0] <= L'9') {
+        wchar_t tmp[NX_PATH];
+        nx_copy(tmp, NX_PATH, out);
+        _snwprintf(out, cap - 1, L"My%ls", tmp);
+        out[cap - 1] = 0;
+    }
+}
+
+/*
+ * JavaScript's String.prototype.trim, for what can still reach it here.
+ *
+ * Not just the space bar. trim() strips WhiteSpace and LineTerminator as ECMA-262
+ * defines them, which includes NBSP, the Unicode Zs category, LS/PS and the BOM.
+ * A project named with a non-breaking space — pasted from a web page, which is
+ * exactly where one comes from — would otherwise keep it in C and lose it in
+ * TypeScript, and the two would disagree about the directory's name.
+ *
+ * Everything below 0x20 is already gone by the time this runs: safeFileName
+ * replaces \x00-\x1f first, which covers TAB, VT, FF, LF and CR. So this only
+ * needs the whitespace at 0x20 and above.
+ */
+static int js_trimmable(wchar_t c)
+{
+    return c == 0x20 || c == 0xa0 || c == 0x1680 ||
+           (c >= 0x2000 && c <= 0x200a) ||
+           c == 0x2028 || c == 0x2029 || c == 0x202f || c == 0x205f ||
+           c == 0x3000 || c == 0xfeff;
+}
+
+/*
+ * Make a project name safe to use as a filename.
+ *
+ * This value becomes a path, and it arrives straight from a text box. Anything
+ * Windows forbids goes, and every path separator with it: "../../evil" as a
+ * project name must not write outside the project directory.
+ *
+ * Order is load-bearing and matches the TypeScript's chain: replace the
+ * forbidden characters, then strip trailing dots and spaces, then trim. Stripping
+ * before replacing would let a name ending in "\t" keep an underscore that
+ * TypeScript drops.
+ */
+void nx_safe_filename(const wchar_t *name, wchar_t *out, size_t cap)
+{
+    /* .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_') */
+    size_t n = 0;
+    for (const wchar_t *p = name; *p && n + 1 < cap; p++) {
+        wchar_t c = *p;
+        int bad = (c == L'<' || c == L'>' || c == L':' || c == L'"' || c == L'/' ||
+                   c == L'\\' || c == L'|' || c == L'?' || c == L'*' || c < 0x20);
+        out[n++] = bad ? L'_' : c;
+    }
+    out[n] = 0;
+
+    /* .replace(/[. ]+$/, '') — trailing dots and spaces only, and only at the end */
+    while (n > 0 && (out[n - 1] == L'.' || out[n - 1] == L' ')) out[--n] = 0;
+
+    /* .trim() */
+    while (n > 0 && js_trimmable(out[n - 1])) out[--n] = 0;
+    size_t lead = 0;
+    while (out[lead] && js_trimmable(out[lead])) lead++;
+    if (lead) memmove(out, out + lead, (n - lead + 1) * sizeof(wchar_t));
+
+    /* || 'Main' */
+    if (!out[0]) nx_copy(out, cap, L"Main");
+}
+
 /*
  * Names the tree never shows.
  *
@@ -123,10 +224,26 @@ static void scan(const wchar_t *dir, FILE *f)
 /*
  *   nexia-core project tree <dir>
  *   nexia-core project read <dir>     — the project's nexia.json, validated
+ *   nexia-core project names <name>   — the wizard's two names for a project name
  */
 int nx_cmd_project(int argc, wchar_t **argv)
 {
-    if (argc < 2) { nx_json_error("project: expected 'tree <dir>' or 'read <dir>'"); return 2; }
+    if (argc < 2) { nx_json_error("project: expected 'tree <dir>', 'read <dir>' or 'names <name>'"); return 2; }
+
+    /* Exists so nx_safe_name and nx_safe_filename can be proven against the
+     * TypeScript before `project create` — the thing that needs them — is
+     * written. Porting the foundation first and testing it later is how you end
+     * up debugging the foundation through the building. */
+    if (!wcscmp(argv[0], L"names")) {
+        wchar_t safe[NX_PATH], file[NX_PATH];
+        nx_safe_name(argv[1], safe, NX_PATH);
+        nx_safe_filename(argv[1], file, NX_PATH);
+        printf("{\"ok\":true,");
+        nx_json_field(stdout, "safeName", safe); printf(",");
+        nx_json_field(stdout, "fileName", file);
+        printf("}\n");
+        return 0;
+    }
 
     if (!wcscmp(argv[0], L"tree")) {
         /* An absent directory is an empty tree, not an error: the IDE asks for

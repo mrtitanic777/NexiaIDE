@@ -107,6 +107,10 @@ int  nx_is_dir(const wchar_t *path);
 void nx_join(wchar_t *out, size_t cap, const wchar_t *a, const wchar_t *b);
 void nx_copy(wchar_t *out, size_t cap, const wchar_t *src);
 
+/* projectManager.ts's createSafeName and safeFileName. See project.c. */
+void nx_safe_name(const wchar_t *name, wchar_t *out, size_t cap);
+void nx_safe_filename(const wchar_t *name, wchar_t *out, size_t cap);
+
 /* ── json.c — output only. We emit JSON; we never parse it. ── */
 void nx_json_str(FILE *f, const wchar_t *s);   /* a quoted, escaped UTF-8 string */
 void nx_json_field(FILE *f, const char *key, const wchar_t *val);
