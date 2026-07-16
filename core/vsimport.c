@@ -858,15 +858,20 @@ static int cond_prop(const wchar_t *xml, const wchar_t *tag, const wchar_t *cfg,
  * Release_LTCG). Emits the ConfigurationSettings object, or nothing (the caller
  * omits the key) when there is no such group. Returns 1 if emitted.
  */
-/*
- * parseConfigGroup: when the project has an ItemDefinitionGroup for cfg, print
- * `[,]"cfg": {...}` into f and clear *first. Nothing when absent, so the key is
- * omitted exactly as `if (parsed) configurations[cfg] = parsed` does. The
- * find-then-print-key order is why this owns the comma rather than the caller:
- * it cannot know whether to print the key until it has found the group.
- */
-static void parse_config_group(const wchar_t *xml, const wchar_t *cfg, FILE *f, int *first)
+/* One configuration's ClCompile/Link settings, held so references can be folded
+ * in before it is emitted. */
+typedef struct {
+    int present;
+    wlist libraries, defines, includeDirectories, libraryDirectories;
+    const char *runtimeLibrary;   /* NULL to omit */
+} cfg_settings;
+
+/* parseConfigGroup into a struct. present stays 0 when there is no group for cfg,
+ * so the caller omits the key exactly as `if (parsed) configurations[cfg]=parsed`
+ * does. */
+static void parse_config_into(const wchar_t *xml, const wchar_t *cfg, cfg_settings *s)
 {
+    memset(s, 0, sizeof *s);
     wchar_t marker[64];
     _snwprintf(marker, 64, L"'%ls|", cfg);
 
@@ -875,47 +880,205 @@ static void parse_config_group(const wchar_t *xml, const wchar_t *cfg, FILE *f, 
          p = wcsstr(p + 1, L"<ItemDefinitionGroup")) {
         const wchar_t *close = wcsstr(p, L"</ItemDefinitionGroup>");
         if (!close) break;
-        size_t len = (size_t)(close + 22 - p);
+        size_t len = (size_t)(close + 22 - p), bl = len < 16383 ? len : 16383;
         wchar_t buf[16384];
-        size_t bl = len < 16383 ? len : 16383;
         wcsncpy(buf, p, bl); buf[bl] = 0;
         if (istr(buf, marker)) { nx_copy(group, 16384, buf); break; }
     }
     if (!group[0]) return;
+    s->present = 1;
 
     wchar_t cl[16384], link[16384];
     block_literal(group, L"ClCompile", cl, 16384);
     block_literal(group, L"Link", link, 16384);
 
     wchar_t v[NX_PATH];
-    wlist rawInc = {0}, rawLibDirs = {0}, kept = {0}, dropped = {0}, libDirs = {0}, dropped2 = {0};
+    wlist rawInc = {0}, rawLibDirs = {0}, dropped = {0}, dropped2 = {0}, rawLibs = {0}, rawDefs = {0};
     if (tag_text(cl, L"AdditionalIncludeDirectories", v, NX_PATH)) split_list(v, &rawInc);
     if (tag_text(link, L"AdditionalLibraryDirectories", v, NX_PATH)) split_list(v, &rawLibDirs);
-    filter_paths(&rawInc, &kept, &dropped);
-    filter_paths(&rawLibDirs, &libDirs, &dropped2);
+    filter_paths(&rawInc, &s->includeDirectories, &dropped);
+    filter_paths(&rawLibDirs, &s->libraryDirectories, &dropped2);
 
-    wlist libs = {0}, defs = {0}, rawLibs = {0}, rawDefs = {0};
     if (tag_text(link, L"AdditionalDependencies", v, NX_PATH)) split_list(v, &rawLibs);
     if (tag_text(cl, L"PreprocessorDefinitions", v, NX_PATH)) split_list(v, &rawDefs);
-    for (int i = 0; i < rawLibs.n; i++) if (!vs_is_unresolvable_macro(rawLibs.v[i])) wl_push(&libs, rawLibs.v[i]);
-    for (int i = 0; i < rawDefs.n; i++) if (!vs_is_unresolvable_macro(rawDefs.v[i])) wl_push(&defs, rawDefs.v[i]);
+    for (int i = 0; i < rawLibs.n; i++) if (!vs_is_unresolvable_macro(rawLibs.v[i])) wl_push(&s->libraries, rawLibs.v[i]);
+    for (int i = 0; i < rawDefs.n; i++) if (!vs_is_unresolvable_macro(rawDefs.v[i])) wl_push(&s->defines, rawDefs.v[i]);
 
     wchar_t rtV[32];
-    const char *rt = vs_map_runtime_library(tag_text(cl, L"RuntimeLibrary", rtV, 32) ? rtV : NULL);
+    s->runtimeLibrary = vs_map_runtime_library(tag_text(cl, L"RuntimeLibrary", rtV, 32) ? rtV : NULL);
 
-    if (!*first) fprintf(f, ",");
-    *first = 0;
-    fprintf(f, "\"%ls\":", cfg);
-    fprintf(f, "{\"libraries\":"); emit_wl(f, &libs);
-    fprintf(f, ",\"defines\":"); emit_wl(f, &defs);
-    fprintf(f, ",\"includeDirectories\":"); emit_wl(f, &kept);
-    fprintf(f, ",\"libraryDirectories\":"); emit_wl(f, &libDirs);
-    if (rt) fprintf(f, ",\"runtimeLibrary\":\"%s\"", rt);
-    fprintf(f, "}");
-
-    wl_free(&rawInc); wl_free(&rawLibDirs); wl_free(&kept); wl_free(&dropped);
-    wl_free(&libDirs); wl_free(&dropped2); wl_free(&libs); wl_free(&defs);
+    wl_free(&rawInc); wl_free(&rawLibDirs); wl_free(&dropped); wl_free(&dropped2);
     wl_free(&rawLibs); wl_free(&rawDefs);
+}
+
+static void free_cfg(cfg_settings *s)
+{
+    wl_free(&s->libraries); wl_free(&s->defines);
+    wl_free(&s->includeDirectories); wl_free(&s->libraryDirectories);
+}
+
+static void emit_cfg(FILE *f, const cfg_settings *s)
+{
+    fprintf(f, "{\"libraries\":"); emit_wl(f, &s->libraries);
+    fprintf(f, ",\"defines\":"); emit_wl(f, &s->defines);
+    fprintf(f, ",\"includeDirectories\":"); emit_wl(f, &s->includeDirectories);
+    fprintf(f, ",\"libraryDirectories\":"); emit_wl(f, &s->libraryDirectories);
+    if (s->runtimeLibrary) fprintf(f, ",\"runtimeLibrary\":\"%s\"", s->runtimeLibrary);
+    fprintf(f, "}");
+}
+
+/* ── project references ───────────────────────────────────────────────────── */
+
+typedef struct {
+    wchar_t path[NX_PATH], name[NX_PATH], libPath[NX_PATH];
+    int exists, isStaticLibrary, haveLib, insideSdk;
+} vs_ref;
+
+/* the $(ProjectDir)/$(Configuration)/$(ProjectName) expansion, case-insensitive,
+ * replace-all. */
+static void expand_ref_macros(const wchar_t *in, const wchar_t *projectDir,
+                              const wchar_t *cfg, const wchar_t *name,
+                              wchar_t *out, size_t cap)
+{
+    static const wchar_t *KEYS[] = { L"$(ProjectDir)", L"$(Configuration)", L"$(ProjectName)" };
+    const wchar_t *VALS[3]; VALS[0] = projectDir; VALS[1] = cfg; VALS[2] = name;
+    wchar_t buf[NX_PATH * 2];
+    nx_copy(buf, NX_PATH * 2, in);
+    for (int k = 0; k < 3; k++) {
+        wchar_t tmp[NX_PATH * 2]; size_t o = 0;
+        size_t kl = wcslen(KEYS[k]);
+        for (const wchar_t *p = buf; *p && o + 1 < NX_PATH * 2; ) {
+            int hit = 1;
+            for (size_t j = 0; j < kl; j++) {
+                wchar_t a = p[j], b = KEYS[k][j];
+                if (a >= L'A' && a <= L'Z') a += 32;
+                if (b >= L'A' && b <= L'Z') b += 32;
+                if (a != b) { hit = 0; break; }
+            }
+            if (hit) { for (const wchar_t *q = VALS[k]; *q && o + 1 < NX_PATH * 2; ) tmp[o++] = *q++; p += kl; }
+            else tmp[o++] = *p++;
+        }
+        tmp[o] = 0;
+        nx_copy(buf, NX_PATH * 2, tmp);
+    }
+    nx_copy(out, cap, buf);
+}
+
+/*
+ * resolveProjectReference: work out the .lib a referenced project produces in
+ * one configuration. The ATG framework is the case that needs every macro —
+ * <ProjectName>, $(OutDir), $(Configuration) — see the note in vsImporter.ts.
+ */
+static void resolve_project_reference(const wchar_t *refPath, const wchar_t *cfg,
+                                      const wchar_t *sdkRoot, vs_ref *r)
+{
+    memset(r, 0, sizeof *r);
+    nx_copy(r->path, NX_PATH, refPath);
+    base_stem(refPath, r->name, NX_PATH);
+
+    if (sdkRoot && sdkRoot[0]) {
+        wchar_t rp[NX_PATH], sp[NX_PATH];
+        if (!GetFullPathNameW(refPath, NX_PATH, rp, NULL)) nx_copy(rp, NX_PATH, refPath);
+        if (!GetFullPathNameW(sdkRoot, NX_PATH, sp, NULL)) nx_copy(sp, NX_PATH, sdkRoot);
+        size_t sl = wcslen(sp);
+        r->insideSdk = (_wcsnicmp(rp, sp, sl) == 0 && rp[sl] == L'\\');
+    }
+
+    wchar_t *xml = read_utf8(refPath);
+    if (!xml) return;                       /* exists:false */
+    r->exists = 1;
+
+    wchar_t nm[NX_PATH];
+    if (tag_text(xml, L"ProjectName", nm, NX_PATH) && nm[0]) nx_copy(r->name, NX_PATH, nm);
+
+    wchar_t cfgType[128] = L"";
+    cond_prop(xml, L"ConfigurationType", cfg, cfgType, 128);
+    if (!istr(cfgType, L"StaticLibrary")) { free(xml); return; }
+    r->isStaticLibrary = 1;
+
+    wchar_t projectDir[NX_PATH];
+    nx_copy(projectDir, NX_PATH, refPath);
+    wchar_t *slash = wcsrchr(projectDir, L'\\');
+    if (!slash) slash = wcsrchr(projectDir, L'/');
+    if (slash) slash[1] = 0;                /* keep trailing separator, as dirname()+sep */
+
+    /* OutDir, macros expanded, resolved against projectDir */
+    wchar_t rawOutDir[NX_PATH], expOutDir[NX_PATH], outDir[NX_PATH];
+    if (!cond_prop(xml, L"OutDir", cfg, rawOutDir, NX_PATH))
+        nx_copy(rawOutDir, NX_PATH, L"$(ProjectDir)$(Configuration)\\");
+    expand_ref_macros(rawOutDir, projectDir, cfg, r->name, expOutDir, NX_PATH);
+    resolve_against(projectDir, expOutDir, outDir, NX_PATH);
+
+    /* OutputFile, macros expanded then $(OutDir) → outDir\, resolved */
+    wchar_t rawOutFile[NX_PATH], expOutFile[NX_PATH];
+    if (!cond_prop(xml, L"OutputFile", cfg, rawOutFile, NX_PATH))
+        nx_copy(rawOutFile, NX_PATH, L"$(OutDir)$(ProjectName).lib");
+    expand_ref_macros(rawOutFile, projectDir, cfg, r->name, expOutFile, NX_PATH);
+
+    /* replace $(OutDir) with outDir + separator, case-insensitive replace-all */
+    wchar_t outDirSep[NX_PATH];
+    _snwprintf(outDirSep, NX_PATH, L"%ls\\", outDir);
+    wchar_t withOut[NX_PATH]; size_t o = 0;
+    for (const wchar_t *p = expOutFile; *p && o + 1 < NX_PATH; ) {
+        int hit = 1;
+        const wchar_t *key = L"$(outdir)";
+        for (int j = 0; j < 9; j++) { wchar_t a = p[j]; if (a >= L'A' && a <= L'Z') a += 32; if (a != key[j]) { hit = 0; break; } }
+        if (hit) { for (const wchar_t *q = outDirSep; *q && o + 1 < NX_PATH; ) withOut[o++] = *q++; p += 9; }
+        else withOut[o++] = *p++;
+    }
+    withOut[o] = 0;
+
+    wchar_t libPath[NX_PATH];
+    resolve_against(projectDir, withOut, libPath, NX_PATH);
+    if (GetFileAttributesW(libPath) != INVALID_FILE_ATTRIBUTES) {
+        r->haveLib = 1;
+        nx_copy(r->libPath, NX_PATH, libPath);
+    }
+    free(xml);
+}
+
+/* parseProjectReferences: the <ProjectReference Include="..."> items, each
+ * resolved for `cfg`. Fills `out` (caller-sized array), returns the count. */
+static int parse_project_references(const wchar_t *xml, const wchar_t *projPath,
+                                    const wchar_t *cfg, const wchar_t *sdkRoot,
+                                    vs_ref *out, int cap)
+{
+    wchar_t projDir[NX_PATH];
+    nx_copy(projDir, NX_PATH, projPath);
+    wchar_t *slash = wcsrchr(projDir, L'\\');
+    if (!slash) slash = wcsrchr(projDir, L'/');
+    if (slash) *slash = 0;
+
+    int n = 0;
+    for (const wchar_t *p = wcsstr(xml, L"<ProjectReference"); p && n < cap;
+         p = wcsstr(p + 1, L"<ProjectReference")) {
+        const wchar_t *q = p + 17;
+        if (!iswspace(*q)) continue;
+        while (iswspace(*q)) q++;
+        if (wcsncmp(q, L"Include=\"", 9)) continue;
+        const wchar_t *v = q + 9, *end = wcschr(v, L'"');
+        if (!end) continue;
+        wchar_t rel[NX_PATH];
+        size_t len = (size_t)(end - v); if (len >= NX_PATH) len = NX_PATH - 1;
+        wcsncpy(rel, v, len); rel[len] = 0;
+        vs_unescape_msbuild(rel);
+        to_host_path(rel);
+        if (vs_is_unresolvable_macro(rel)) continue;
+        wchar_t abs[NX_PATH];
+        resolve_against(projDir, rel, abs, NX_PATH);
+        resolve_project_reference(abs, cfg, sdkRoot, &out[n++]);
+    }
+    return n;
+}
+
+static void emit_ref(FILE *f, const vs_ref *r)
+{
+    fprintf(f, "{\"path\":"); nx_json_str(f, r->path);
+    fprintf(f, ",\"name\":"); nx_json_str(f, r->name);
+    fprintf(f, ",\"exists\":%s", r->exists ? "true" : "false");
+    fprintf(f, ",\"isStaticLibrary\":%s", r->isStaticLibrary ? "true" : "false");
+    if (r->haveLib) { fprintf(f, ",\"libPath\":"); nx_json_str(f, r->libPath); }
+    fprintf(f, ",\"insideSdk\":%s}", r->insideSdk ? "true" : "false");
 }
 
 static const wchar_t *VS_CONFIGS[] = { L"Debug", L"Release", L"Profile", L"Release_LTCG" };
@@ -974,35 +1137,106 @@ static int parse_vcxproj(const wchar_t *projPath, const wchar_t *sdkRoot)
     block_literal(debugGroup, L"Link", link, 16384);
 
     wchar_t v[NX_PATH];
-    wlist rawInc = {0}, rawLibDirs = {0}, inc = {0}, dropInc = {0}, libDirs = {0}, dropLib = {0};
+    wlist rawInc = {0}, rawLibDirs = {0}, inc = {0}, dropInc = {0}, flatLibDirs = {0}, dropLib = {0};
     if (tag_text(cl, L"AdditionalIncludeDirectories", v, NX_PATH)) split_list(v, &rawInc);
     if (tag_text(link, L"AdditionalLibraryDirectories", v, NX_PATH)) split_list(v, &rawLibDirs);
     filter_paths(&rawInc, &inc, &dropInc);
-    filter_paths(&rawLibDirs, &libDirs, &dropLib);
+    filter_paths(&rawLibDirs, &flatLibDirs, &dropLib);
     for (int i = 0; i < dropInc.n; i++) { wchar_t w[NX_PATH]; _snwprintf(w, NX_PATH, L"Include path not imported (VS/SDK macro — Nexia adds the XDK paths itself): %ls", dropInc.v[i]); wl_push(&warnings, w); }
     for (int i = 0; i < dropLib.n; i++) { wchar_t w[NX_PATH]; _snwprintf(w, NX_PATH, L"Library path not imported (VS/SDK macro — Nexia adds the XDK paths itself): %ls", dropLib.v[i]); wl_push(&warnings, w); }
 
-    wlist rawLibs = {0}, rawDefs = {0}, libs = {0}, defs = {0};
+    wlist rawLibs = {0}, rawDefs = {0}, defs = {0};
     if (tag_text(link, L"AdditionalDependencies", v, NX_PATH)) split_list(v, &rawLibs);
     if (tag_text(cl, L"PreprocessorDefinitions", v, NX_PATH)) split_list(v, &rawDefs);
     for (int i = 0; i < rawDefs.n; i++) if (!vs_is_unresolvable_macro(rawDefs.v[i])) wl_push(&defs, rawDefs.v[i]);
 
-    /* the opening configuration's libraries feed the flat `libraries`. With no
-     * per-config parse wired to the flat field yet, this mirrors the fallback
-     * branch: rawLibs minus unresolvable. (The opening-config path arrives with
-     * project references, next commit.) */
-    for (int i = 0; i < rawLibs.n; i++) if (!vs_is_unresolvable_macro(rawLibs.v[i])) wl_push(&libs, rawLibs.v[i]);
+    /* the four configurations, into structs so references can be folded in */
+    cfg_settings cfgs[4];
+    for (int i = 0; i < 4; i++) parse_config_into(xml, VS_CONFIGS[i], &cfgs[i]);
+
+    /* the reference set the top-level field and the once-per-ref warnings use,
+     * resolved for the configuration the project opens in (Debug). */
+    enum { MAXREF = 64 };
+    vs_ref dbgRefs[MAXREF];
+    int nDbg = parse_project_references(xml, projPath, L"Debug", sdkRoot, dbgRefs, MAXREF);
+
+    /* per-configuration merge: a referenced static library is linked by VS
+     * without ever appearing in AdditionalDependencies, and it builds its own
+     * .lib per configuration, so each configuration folds in its own. */
+    for (int ci = 0; ci < 4; ci++) {
+        if (!cfgs[ci].present) continue;
+        vs_ref refs[MAXREF];
+        int nr = parse_project_references(xml, projPath, VS_CONFIGS[ci], sdkRoot, refs, MAXREF);
+        for (int i = 0; i < nr; i++) {
+            vs_ref *r = &refs[i];
+            if (!r->isStaticLibrary) continue;
+            if (!r->haveLib) {
+                if (r->exists && wcscmp(VS_CONFIGS[ci], L"Debug")) {
+                    wchar_t w[NX_PATH * 2];
+                    _snwprintf(w, NX_PATH * 2,
+                        L"%ls: your SDK has no %ls build of \"%ls\", so it isn't linked for that "
+                        L"configuration. Only a problem if your code calls into %ls — build it for "
+                        L"%ls in Visual Studio if so.",
+                        VS_CONFIGS[ci], VS_CONFIGS[ci], r->name, r->name, VS_CONFIGS[ci]);
+                    wl_push(&warnings, w);
+                }
+                continue;
+            }
+            wchar_t libName[NX_PATH]; base_stem_keepext(r->libPath, libName, NX_PATH);
+            if (!wl_has_ci(&cfgs[ci].libraries, libName)) wl_push(&cfgs[ci].libraries, libName);
+            wchar_t dir[NX_PATH]; nx_copy(dir, NX_PATH, r->libPath);
+            wchar_t *slash = wcsrchr(dir, L'\\'); if (slash) *slash = 0;
+            /* Array.includes: case-sensitive */
+            int seen = 0;
+            for (int k = 0; k < cfgs[ci].libraryDirectories.n; k++)
+                if (!wcscmp(cfgs[ci].libraryDirectories.v[k], dir)) seen = 1;
+            if (!seen) wl_push(&cfgs[ci].libraryDirectories, dir);
+        }
+    }
+
+    /* once-per-reference warnings, from the Debug set */
+    for (int i = 0; i < nDbg; i++) {
+        vs_ref *r = &dbgRefs[i];
+        if (!r->isStaticLibrary) continue;
+        if (!r->exists) {
+            wchar_t w[NX_PATH * 2];
+            _snwprintf(w, NX_PATH * 2, L"Referenced project not found on disk, so its library can't be linked: %ls", r->path);
+            wl_push(&warnings, w);
+        } else if (!r->haveLib) {
+            wchar_t w[NX_PATH * 2];
+            _snwprintf(w, NX_PATH * 2,
+                L"\"%ls\" is referenced as a static library but its built .lib wasn't found. "
+                L"Build it in Visual Studio (Debug configuration) and re-import, or the link will fail.", r->name);
+            wl_push(&warnings, w);
+        }
+    }
+
+    /* flat libraries / libraryDirectories, from Debug post-merge (else fallback) */
+    cfg_settings *opening = cfgs[0].present ? &cfgs[0] : NULL;
+    wlist flatLibs = {0}, flatLibDirsOut = {0};
+    if (opening) {
+        for (int i = 0; i < opening->libraries.n; i++) wl_push(&flatLibs, opening->libraries.v[i]);
+        for (int i = 0; i < flatLibDirs.n; i++) wl_push(&flatLibDirsOut, flatLibDirs.v[i]);
+        /* refLibDirs = opening.libraryDirectories not already in flat */
+        for (int i = 0; i < opening->libraryDirectories.n; i++) {
+            int seen = 0;
+            for (int k = 0; k < flatLibDirs.n; k++)
+                if (!wcscmp(flatLibDirs.v[k], opening->libraryDirectories.v[i])) seen = 1;
+            if (!seen) wl_push(&flatLibDirsOut, opening->libraryDirectories.v[i]);
+        }
+    } else {
+        for (int i = 0; i < rawLibs.n; i++) if (!vs_is_unresolvable_macro(rawLibs.v[i])) wl_push(&flatLibs, rawLibs.v[i]);
+        for (int i = 0; i < flatLibDirs.n; i++) wl_push(&flatLibDirsOut, flatLibDirs.v[i]);
+    }
 
     wchar_t ctypeV[64];
     const char *type = vs_map_configuration_type(tag_text(xml, L"ConfigurationType", ctypeV, 64) ? ctypeV : NULL);
 
-    /* pch */
     wchar_t pfileV[NX_PATH], pmodeV[64], pch[NX_PATH]; int havePch = 0;
     int hasFile = tag_text(cl, L"PrecompiledHeaderFile", pfileV, NX_PATH);
     int hasMode = tag_text(cl, L"PrecompiledHeader", pmodeV, 64);
     infer_pch(hasFile ? pfileV : NULL, hasMode ? pmodeV : NULL, &headers, pch, NX_PATH, &havePch);
 
-    /* flags */
     wchar_t b1[16], b2[32], b3[32], b4[32], b5[16], b6[32];
     int rtti = parse_bool(tag_text(cl, L"RuntimeTypeInfo", b1, 16) ? b1 : NULL);
     const char *eh = vs_map_exceptions(tag_text(cl, L"ExceptionHandling", b2, 32) ? b2 : NULL);
@@ -1019,22 +1253,31 @@ static int parse_vcxproj(const wchar_t *projPath, const wchar_t *sdkRoot)
     printf("\"name\":");        nx_json_str(stdout, name);     printf(",");
     printf("\"projectPath\":"); nx_json_str(stdout, projPath); printf(",");
     printf("\"format\":\"vcxproj\",");
-    printf("\"projectReferences\":[],");
+    printf("\"projectReferences\":[");
+    for (int i = 0; i < nDbg; i++) { if (i) printf(","); emit_ref(stdout, &dbgRefs[i]); }
+    printf("],");
     printf("\"configurations\":{");
     int firstCfg = 1;
-    for (int i = 0; i < 4; i++) parse_config_group(xml, VS_CONFIGS[i], stdout, &firstCfg);
+    for (int i = 0; i < 4; i++) {
+        if (!cfgs[i].present) continue;
+        if (!firstCfg) printf(",");
+        firstCfg = 0;
+        printf("\"%ls\":", VS_CONFIGS[i]);
+        emit_cfg(stdout, &cfgs[i]);
+    }
     printf("},");
     printf("\"sources\":");   emit_wl(stdout, &sources); printf(",");
     printf("\"headers\":");   emit_wl(stdout, &headers); printf(",");
     printf("\"otherFiles\":");emit_wl(stdout, &others);  printf(",");
-    emit_flags(stdout, type, &inc, &libDirs, &libs, &defs, pch, havePch,
+    emit_flags(stdout, type, &inc, &flatLibDirsOut, &flatLibs, &defs, pch, havePch,
                rtti, eh, rt, wl, twae, opt, &warnings);
     printf("}\n");
 
+    for (int i = 0; i < 4; i++) free_cfg(&cfgs[i]);
     wl_free(&sources); wl_free(&headers); wl_free(&others); wl_free(&warnings);
     wl_free(&rawInc); wl_free(&rawLibDirs); wl_free(&inc); wl_free(&dropInc);
-    wl_free(&libDirs); wl_free(&dropLib); wl_free(&rawLibs); wl_free(&rawDefs);
-    wl_free(&libs); wl_free(&defs);
+    wl_free(&flatLibDirs); wl_free(&dropLib); wl_free(&rawLibs); wl_free(&rawDefs);
+    wl_free(&defs); wl_free(&flatLibs); wl_free(&flatLibDirsOut);
     free(xml);
     return 0;
 }

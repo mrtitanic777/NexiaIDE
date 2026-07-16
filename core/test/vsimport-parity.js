@@ -281,6 +281,67 @@ function deepEq(a, b, pathStr = '') {
     }
 }
 
+/* ── layer 5: parseVcxproj WITH a project reference (the ATG case) ───────────── */
+{
+    const parseVcxproj = lift('parseVcxproj');
+    const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'nexia-ref-'));
+    // A "SDK" so insideSdk is exercised; the referenced project lives inside it.
+    const sdk = fs.mkdtempSync(path.join(TMP, 'sdk-'));
+    const common = path.join(sdk, 'Source', 'Samples', 'Common');
+    fs.mkdirSync(common, { recursive: true });
+
+    // The referenced static-lib project, ATG-shaped: ProjectName differs from the
+    // file stem, OutDir/OutputFile use macros, and it builds per configuration.
+    const atg = path.join(common, 'AtgFramework2010.vcxproj');
+    fs.writeFileSync(atg, `<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="Globals"><ProjectName>AtgFramework</ProjectName></PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Xbox 360'"><ConfigurationType>StaticLibrary</ConfigurationType></PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Xbox 360'"><ConfigurationType>StaticLibrary</ConfigurationType></PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Profile|Xbox 360'"><ConfigurationType>StaticLibrary</ConfigurationType></PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Xbox 360'">
+    <Link><OutputFile>$(OutDir)$(ProjectName).lib</OutputFile></Link>
+    <OutDir>$(ProjectDir)$(Configuration)\\</OutDir>
+  </ItemDefinitionGroup>
+</Project>`, 'utf-8');
+    // Build AtgFramework.lib for Debug and Release, but NOT Profile — the exact
+    // SDK reality the "no Profile build" warning describes.
+    for (const cfg of ['Debug', 'Release']) {
+        fs.mkdirSync(path.join(common, cfg), { recursive: true });
+        fs.writeFileSync(path.join(common, cfg, 'AtgFramework.lib'), 'x');
+    }
+
+    // The importing project references it and has all four configurations.
+    const dir = fs.mkdtempSync(path.join(TMP, 'game-'));
+    const proj = path.join(dir, 'Menu.vcxproj');
+    const rel = path.relative(dir, atg).replace(/\//g, '\\');
+    const grp = (cfg, rt) => `
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='${cfg}|Xbox 360'">
+    <ClCompile><RuntimeLibrary>${rt}</RuntimeLibrary><PreprocessorDefinitions>_XBOX</PreprocessorDefinitions></ClCompile>
+    <Link><AdditionalDependencies>xapilib.lib</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>`;
+    fs.writeFileSync(proj, `<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="Globals"><ProjectName>Menu</ProjectName><ConfigurationType>Application</ConfigurationType></PropertyGroup>
+  <ItemGroup><ClCompile Include="src\\main.cpp" /></ItemGroup>
+  <ItemGroup><ProjectReference Include="${rel}"><Project>{1234}</Project></ProjectReference></ItemGroup>${grp('Debug','MultiThreadedDebug')}${grp('Release','MultiThreaded')}${grp('Profile','MultiThreaded')}${grp('Release_LTCG','MultiThreaded')}
+</Project>`, 'utf-8');
+
+    const ts = parseVcxproj(proj, sdk);
+    let c;
+    try { c = JSON.parse(execFileSync(CORE, ['vsimport', 'vcxproj', proj, '--sdk', sdk], { encoding: 'utf8' })); }
+    catch (e) { fail(`vcxproj+ref: C threw: ${e.message}`); c = null; }
+    if (c) {
+        delete c.ok;
+        checks++;
+        if (deepEq(ts, c, 'vcxproj+ref')) {
+            const dbgLibs = ts.configurations.Debug.libraries.join(',');
+            console.log(`  vcxproj+ref: ref resolved (insideSdk=${ts.projectReferences[0].insideSdk}), ` +
+                `Debug libs [${dbgLibs}], ${ts.warnings.length} warnings (incl. Profile-missing)`);
+        }
+    }
+}
+
 console.log();
 console.log('  ================================================================');
 console.log(bad === 0
