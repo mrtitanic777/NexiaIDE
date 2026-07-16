@@ -1,5 +1,32 @@
 # Changelog
 
+## v3.3.0 (unreleased)
+
+### Fixes
+
+- **A local profile picture is shown to its owner only.** `userAvatarSrc`
+  ignored the user it was asked about and answered with the local upload for
+  anybody, so the developer panel — the one screen that draws other people —
+  painted the local user's face onto all ten rows. Nothing was ever written to
+  any account: `avatarDataUrl` has no path to the server, and lives in this
+  machine's prefs file and nowhere else. The list asked "what picture for this
+  user?" ten times and got the same answer, because the argument was never read.
+  A local upload still wins for its owner, matched by id while signed in, and by
+  email when nobody is — `LastAccount` stores no id, so an id-only check would
+  have quietly dropped the picture from the welcome-back prompt instead. Users
+  with an `avatarUrl` of their own keep it; the rest fall back to their initial.
+
+### Under the hood
+
+- **The toolchain is C.** SDK detection, the XEX parser, the project tree, the
+  devkit (XBDM) client, extension management, the emulator process work, and now
+  the build command lines and the compiler output parser all live in
+  `nexia-core.exe` rather than in TypeScript. Nothing about the IDE looks
+  different and nothing about it is faster — `cl.exe` dominates a build. What
+  changes is that each of those was written twice, in two languages, and a fix to
+  one could leave the other broken. They are now written once. TypeScript
+  orchestrates and spawns; the C computes.
+
 ## v3.0.0
 
 Everything below is measured against **v2.1.0**, the last release. The installer is
