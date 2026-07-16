@@ -4,7 +4,7 @@
  *     npx tsc && node scripts/gen-templates.js
  *
  * The project template table, from projectManager.ts's getTemplates().
- * 6 templates, 22 files, 37460 bytes of content.
+ * 6 templates, 22 files, 37935 bytes of content.
  *
  * Proven byte-for-byte against the TypeScript by core/test/templates-parity.js.
  */
@@ -690,17 +690,24 @@ static const nx_tpl_file FILES_hello_world[] = {
         "\n"
         "    if (FAILED(hr) || g_pTexture == NULL) {\n"
         "        char buf[256];\n"
-        "        sprintf(buf, \"Failed to load texture: game:\\\\Content\\\\dirt.png (HRESULT: 0x%08X)\\n\", hr);\n"
+        "        sprintf(buf, \"Texture not found: game:\\\\Content\\\\dirt.png (HRESULT: 0x%08X). Using magenta fallback.\\n\", hr);\n"
         "        OutputDebugStringA(buf);\n"
-        "        // Fallback: procedural dirt-colored texture\n"
-        "        g_pd3dDevice->CreateTexture(4, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_pTexture, NULL);\n"
-        "        D3DLOCKED_RECT lr;\n"
-        "        g_pTexture->LockRect(0, &lr, NULL, 0);\n"
-        "        DWORD dirtColors[] = { 0xFF8B6914, 0xFF7A5C12, 0xFF9B7920, 0xFF6B4E10 };\n"
-        "        DWORD* pixels = (DWORD*)lr.pBits;\n"
-        "        for (int i = 0; i < 16; i++)\n"
-        "            pixels[i] = dirtColors[i % 4];\n"
-        "        g_pTexture->UnlockRect(0);\n"
+        "        // Fallback: a solid magenta texture \342\200\224 the classic \"missing texture\"\n"
+        "        // signal, so a build with no dirt.png in Content\\ is obvious on screen\n"
+        "        // instead of silently wrong. Guarded so a failed CreateTexture cannot\n"
+        "        // null-deref into LockRect, and Pitch-correct because a locked surface\n"
+        "        // is row-padded, not a tight width*4 buffer.\n"
+        "        g_pTexture = NULL;\n"
+        "        if (SUCCEEDED(g_pd3dDevice->CreateTexture(4, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_pTexture, NULL)) && g_pTexture) {\n"
+        "            D3DLOCKED_RECT lr;\n"
+        "            if (SUCCEEDED(g_pTexture->LockRect(0, &lr, NULL, 0))) {\n"
+        "                for (int y = 0; y < 4; y++) {\n"
+        "                    DWORD* row = (DWORD*)((BYTE*)lr.pBits + y * lr.Pitch);\n"
+        "                    for (int x = 0; x < 4; x++) row[x] = 0xFFFF00FF; // ARGB magenta\n"
+        "                }\n"
+        "                g_pTexture->UnlockRect(0);\n"
+        "            }\n"
+        "        }\n"
         "    }\n"
         "\n"
         "    return S_OK;\n"

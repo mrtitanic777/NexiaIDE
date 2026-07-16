@@ -701,17 +701,24 @@ HRESULT InitScene() {
 
     if (FAILED(hr) || g_pTexture == NULL) {
         char buf[256];
-        sprintf(buf, "Failed to load texture: game:\\\\Content\\\\dirt.png (HRESULT: 0x%08X)\\n", hr);
+        sprintf(buf, "Texture not found: game:\\\\Content\\\\dirt.png (HRESULT: 0x%08X). Using magenta fallback.\\n", hr);
         OutputDebugStringA(buf);
-        // Fallback: procedural dirt-colored texture
-        g_pd3dDevice->CreateTexture(4, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_pTexture, NULL);
-        D3DLOCKED_RECT lr;
-        g_pTexture->LockRect(0, &lr, NULL, 0);
-        DWORD dirtColors[] = { 0xFF8B6914, 0xFF7A5C12, 0xFF9B7920, 0xFF6B4E10 };
-        DWORD* pixels = (DWORD*)lr.pBits;
-        for (int i = 0; i < 16; i++)
-            pixels[i] = dirtColors[i % 4];
-        g_pTexture->UnlockRect(0);
+        // Fallback: a solid magenta texture — the classic "missing texture"
+        // signal, so a build with no dirt.png in Content\\ is obvious on screen
+        // instead of silently wrong. Guarded so a failed CreateTexture cannot
+        // null-deref into LockRect, and Pitch-correct because a locked surface
+        // is row-padded, not a tight width*4 buffer.
+        g_pTexture = NULL;
+        if (SUCCEEDED(g_pd3dDevice->CreateTexture(4, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_pTexture, NULL)) && g_pTexture) {
+            D3DLOCKED_RECT lr;
+            if (SUCCEEDED(g_pTexture->LockRect(0, &lr, NULL, 0))) {
+                for (int y = 0; y < 4; y++) {
+                    DWORD* row = (DWORD*)((BYTE*)lr.pBits + y * lr.Pitch);
+                    for (int x = 0; x < 4; x++) row[x] = 0xFFFF00FF; // ARGB magenta
+                }
+                g_pTexture->UnlockRect(0);
+            }
+        }
     }
 
     return S_OK;
