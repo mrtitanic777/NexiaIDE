@@ -224,6 +224,63 @@ function deepEq(a, b, pathStr = '') {
     }
 }
 
+/* ── layer 4: parseVcxproj on a reference-free MSBuild project ───────────────── */
+{
+    const parseVcxproj = lift('parseVcxproj');
+    const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'nexia-vcxproj-'));
+    const dir = fs.mkdtempSync(path.join(TMP, 'p-'));
+    const proj = path.join(dir, 'Game.vcxproj');
+    // Per-configuration ItemDefinitionGroups so all four config paths are hit,
+    // with Debug/Release differing in RuntimeLibrary — the /MTd-vs-/MT split that
+    // was a real bug when it was collapsed to one project-wide value. Release and
+    // Release_LTCG present; Profile deliberately absent, so its key is omitted.
+    const g = (cfg, rt, extraLib) => `
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='${cfg}|Xbox 360'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>include;$(XEDK)\\include;$(ProjectDir)src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>_XBOX;${cfg === 'Debug' ? '_DEBUG' : 'NDEBUG'};%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>${rt}</RuntimeLibrary>
+      <WarningLevel>Level3</WarningLevel>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <RuntimeTypeInfo>false</RuntimeTypeInfo>
+      <Optimization>${cfg === 'Debug' ? 'Disabled' : 'MaxSpeed'}</Optimization>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>xapilib.lib;${extraLib};%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(XEDK)\\lib\\xbox;lib</AdditionalLibraryDirectories>
+    </Link>
+  </ItemDefinitionGroup>`;
+    const vcxproj = `<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="Globals">
+    <ProjectName>GameTitle</ProjectName>
+    <ConfigurationType>Application</ConfigurationType>
+  </PropertyGroup>
+  <ItemGroup>
+    <ClCompile Include="src\\stdafx.cpp" />
+    <ClCompile Include="src\\main.cpp" />
+    <ClInclude Include="src\\stdafx.h" />
+    <None Include="readme.txt" />
+    <Image Include="art\\icon.png" />
+    <ClCompile Include="$(XEDK)\\generated.cpp" />
+  </ItemGroup>${g('Debug', 'MultiThreadedDebug', 'd3d9d.lib')}${g('Release', 'MultiThreaded', 'd3d9i.lib')}${g('Release_LTCG', 'MultiThreaded', 'd3d9ltcg.lib')}
+</Project>`;
+    fs.writeFileSync(proj, vcxproj, 'utf-8');
+
+    const ts = parseVcxproj(proj);
+    let c;
+    try { c = JSON.parse(execFileSync(CORE, ['vsimport', 'vcxproj', proj], { encoding: 'utf8' })); }
+    catch (e) { fail(`vcxproj: C threw: ${e.message}`); c = null; }
+    if (c) {
+        delete c.ok;
+        checks++;
+        const cfgKeys = Object.keys(ts.configurations).join(',');
+        if (deepEq(ts, c, 'vcxproj'))
+            console.log(`  vcxproj:  ${ts.sources.length} src, configs [${cfgKeys}] (Profile absent), flags + warnings match`);
+    }
+}
+
 console.log();
 console.log('  ================================================================');
 console.log(bad === 0

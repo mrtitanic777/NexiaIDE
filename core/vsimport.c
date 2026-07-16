@@ -751,6 +751,294 @@ static int parse_vcproj(const wchar_t *projPath)
     return 0;
 }
 
+/* ── .vcxproj (MSBuild) scanners ──────────────────────────────────────────── */
+
+/*
+ * block_literal: `<Tag>([\s\S]*?)</Tag>`, the strict form with no attributes —
+ * what parseVcxproj uses for <ClCompile> and <Link>. First match, inner copied
+ * to out (not trimmed; the callers trim per-field via tagText). Returns 1/0.
+ */
+static int block_literal(const wchar_t *xml, const wchar_t *tag, wchar_t *out, size_t cap)
+{
+    wchar_t open[64], close[64];
+    _snwprintf(open, 64, L"<%ls>", tag);
+    _snwprintf(close, 64, L"</%ls>", tag);
+    const wchar_t *a = wcsstr(xml, open);
+    if (!a) { out[0] = 0; return 0; }
+    a += wcslen(open);
+    const wchar_t *b = wcsstr(a, close);
+    if (!b) { out[0] = 0; return 0; }
+    size_t len = (size_t)(b - a);
+    if (len >= cap) len = cap - 1;
+    wcsncpy(out, a, len); out[len] = 0;
+    return 1;
+}
+
+/*
+ * tagText: `<Tag[^>]*>([\s\S]*?)</Tag>`, allowing attributes on the open tag.
+ * First match, inner trimmed. Returns 1 + fills out, else 0.
+ *
+ * Faithful to the regex, `[^>]*` does not stop at a longer tag name, so this
+ * matches the opening `<Tag` then scans to the first `>` that is not inside the
+ * name — which is what the regex does too. The values it reads (RuntimeLibrary,
+ * PreprocessorDefinitions, ...) have no longer-named siblings, so the quirk is
+ * inert, but it is reproduced rather than tightened.
+ */
+static int tag_text(const wchar_t *xml, const wchar_t *tag, wchar_t *out, size_t cap)
+{
+    size_t tl = wcslen(tag);
+    for (const wchar_t *p = xml; (p = wcschr(p, L'<')); p++) {
+        if (wcsncmp(p + 1, tag, tl)) continue;
+        const wchar_t *gt = wcschr(p + 1 + tl, L'>');
+        if (!gt) return 0;
+        /* the open tag must not itself be a close tag */
+        if (p[1] == L'/') continue;
+        const wchar_t *inner = gt + 1;
+        wchar_t close[64];
+        _snwprintf(close, 64, L"</%ls>", tag);
+        const wchar_t *end = wcsstr(inner, close);
+        if (!end) return 0;
+        size_t len = (size_t)(end - inner);
+        if (len >= cap) len = cap - 1;
+        wcsncpy(out, inner, len); out[len] = 0;
+        trim(out);
+        return 1;
+    }
+    return 0;
+}
+
+/*
+ * condProp: a `<Tag Condition="...'CFG|...">inner</Tag>`, else fall back to
+ * tagText. The conditional value is unescapeMsbuild'd; the fallback is not (it
+ * goes through tagText, which the TypeScript leaves as-is). Returns 1/0.
+ */
+static int cond_prop(const wchar_t *xml, const wchar_t *tag, const wchar_t *cfg, wchar_t *out, size_t cap)
+{
+    size_t tl = wcslen(tag);
+    wchar_t marker[64];
+    _snwprintf(marker, 64, L"'%ls|", cfg);   /* 'Debug| */
+
+    for (const wchar_t *p = xml; (p = wcschr(p, L'<')); p++) {
+        if (wcsncmp(p + 1, tag, tl)) continue;
+        if (p[1] == L'/') continue;
+        const wchar_t *gt = wcschr(p + 1 + tl, L'>');
+        if (!gt) break;
+        /* opening tag text between <Tag and > */
+        /* require a Condition="..." whose quoted value contains 'CFG| */
+        const wchar_t *cond = NULL;
+        for (const wchar_t *q = p + 1 + tl; q < gt; q++)
+            if (!wcsncmp(q, L"Condition=\"", 11)) { cond = q + 11; break; }
+        if (!cond) continue;
+        const wchar_t *cend = wcschr(cond, L'"');
+        if (!cend || cend > gt) continue;
+        /* is 'CFG| inside cond..cend ? */
+        int match = 0;
+        for (const wchar_t *r = cond; r + wcslen(marker) <= cend; r++)
+            if (!wcsncmp(r, marker, wcslen(marker))) { match = 1; break; }
+        if (!match) continue;
+
+        const wchar_t *inner = gt + 1;
+        wchar_t close[64];
+        _snwprintf(close, 64, L"</%ls>", tag);
+        const wchar_t *end = wcsstr(inner, close);
+        if (!end) return 0;
+        size_t len = (size_t)(end - inner);
+        if (len >= cap) len = cap - 1;
+        wcsncpy(out, inner, len); out[len] = 0;
+        trim(out);
+        vs_unescape_msbuild(out);
+        return 1;
+    }
+    return tag_text(xml, tag, out, cap);
+}
+
+/*
+ * parseConfigGroup: the ClCompile/Link settings for one configuration, from the
+ * ItemDefinitionGroup whose text contains 'CFG| (so Release does not also match
+ * Release_LTCG). Emits the ConfigurationSettings object, or nothing (the caller
+ * omits the key) when there is no such group. Returns 1 if emitted.
+ */
+/*
+ * parseConfigGroup: when the project has an ItemDefinitionGroup for cfg, print
+ * `[,]"cfg": {...}` into f and clear *first. Nothing when absent, so the key is
+ * omitted exactly as `if (parsed) configurations[cfg] = parsed` does. The
+ * find-then-print-key order is why this owns the comma rather than the caller:
+ * it cannot know whether to print the key until it has found the group.
+ */
+static void parse_config_group(const wchar_t *xml, const wchar_t *cfg, FILE *f, int *first)
+{
+    wchar_t marker[64];
+    _snwprintf(marker, 64, L"'%ls|", cfg);
+
+    wchar_t group[16384]; group[0] = 0;
+    for (const wchar_t *p = wcsstr(xml, L"<ItemDefinitionGroup"); p;
+         p = wcsstr(p + 1, L"<ItemDefinitionGroup")) {
+        const wchar_t *close = wcsstr(p, L"</ItemDefinitionGroup>");
+        if (!close) break;
+        size_t len = (size_t)(close + 22 - p);
+        wchar_t buf[16384];
+        size_t bl = len < 16383 ? len : 16383;
+        wcsncpy(buf, p, bl); buf[bl] = 0;
+        if (istr(buf, marker)) { nx_copy(group, 16384, buf); break; }
+    }
+    if (!group[0]) return;
+
+    wchar_t cl[16384], link[16384];
+    block_literal(group, L"ClCompile", cl, 16384);
+    block_literal(group, L"Link", link, 16384);
+
+    wchar_t v[NX_PATH];
+    wlist rawInc = {0}, rawLibDirs = {0}, kept = {0}, dropped = {0}, libDirs = {0}, dropped2 = {0};
+    if (tag_text(cl, L"AdditionalIncludeDirectories", v, NX_PATH)) split_list(v, &rawInc);
+    if (tag_text(link, L"AdditionalLibraryDirectories", v, NX_PATH)) split_list(v, &rawLibDirs);
+    filter_paths(&rawInc, &kept, &dropped);
+    filter_paths(&rawLibDirs, &libDirs, &dropped2);
+
+    wlist libs = {0}, defs = {0}, rawLibs = {0}, rawDefs = {0};
+    if (tag_text(link, L"AdditionalDependencies", v, NX_PATH)) split_list(v, &rawLibs);
+    if (tag_text(cl, L"PreprocessorDefinitions", v, NX_PATH)) split_list(v, &rawDefs);
+    for (int i = 0; i < rawLibs.n; i++) if (!vs_is_unresolvable_macro(rawLibs.v[i])) wl_push(&libs, rawLibs.v[i]);
+    for (int i = 0; i < rawDefs.n; i++) if (!vs_is_unresolvable_macro(rawDefs.v[i])) wl_push(&defs, rawDefs.v[i]);
+
+    wchar_t rtV[32];
+    const char *rt = vs_map_runtime_library(tag_text(cl, L"RuntimeLibrary", rtV, 32) ? rtV : NULL);
+
+    if (!*first) fprintf(f, ",");
+    *first = 0;
+    fprintf(f, "\"%ls\":", cfg);
+    fprintf(f, "{\"libraries\":"); emit_wl(f, &libs);
+    fprintf(f, ",\"defines\":"); emit_wl(f, &defs);
+    fprintf(f, ",\"includeDirectories\":"); emit_wl(f, &kept);
+    fprintf(f, ",\"libraryDirectories\":"); emit_wl(f, &libDirs);
+    if (rt) fprintf(f, ",\"runtimeLibrary\":\"%s\"", rt);
+    fprintf(f, "}");
+
+    wl_free(&rawInc); wl_free(&rawLibDirs); wl_free(&kept); wl_free(&dropped);
+    wl_free(&libDirs); wl_free(&dropped2); wl_free(&libs); wl_free(&defs);
+    wl_free(&rawLibs); wl_free(&rawDefs);
+}
+
+static const wchar_t *VS_CONFIGS[] = { L"Debug", L"Release", L"Profile", L"Release_LTCG" };
+
+static int parse_vcxproj(const wchar_t *projPath, const wchar_t *sdkRoot)
+{
+    (void)sdkRoot;   /* project references land in the next commit */
+    wchar_t *xml = read_utf8(projPath);
+    if (!xml) { nx_json_error("vsimport project: cannot read the .vcxproj"); return 1; }
+
+    wlist sources = {0}, headers = {0}, others = {0}, warnings = {0};
+
+    /* items: <(ClCompile|ClInclude|None|Text|Image|CustomBuild)\s+Include="..."> */
+    static const wchar_t *KINDS[] = { L"ClCompile", L"ClInclude", L"None", L"Text", L"Image", L"CustomBuild" };
+    for (const wchar_t *p = xml; (p = wcschr(p, L'<')); p++) {
+        const wchar_t *kind = NULL; size_t kl = 0;
+        for (int i = 0; i < 6; i++) {
+            size_t l = wcslen(KINDS[i]);
+            if (!wcsncmp(p + 1, KINDS[i], l) && iswspace(p[1 + l])) { kind = KINDS[i]; kl = l; break; }
+        }
+        if (!kind) continue;
+        const wchar_t *q = p + 1 + kl;
+        while (iswspace(*q)) q++;
+        if (wcsncmp(q, L"Include=\"", 9)) continue;
+        const wchar_t *v = q + 9, *end = wcschr(v, L'"');
+        if (!end) continue;
+        wchar_t rawInc[NX_PATH], rel[NX_PATH];
+        size_t len = (size_t)(end - v); if (len >= NX_PATH) len = NX_PATH - 1;
+        wcsncpy(rawInc, v, len); rawInc[len] = 0;
+        nx_copy(rel, NX_PATH, rawInc);
+        to_host_path(rel);
+        if (vs_is_unresolvable_macro(rel)) {
+            wchar_t w[NX_PATH]; _snwprintf(w, NX_PATH, L"Skipped item with unresolved macro: %ls", rawInc);
+            wl_push(&warnings, w); continue;
+        }
+        if (!wcscmp(kind, L"ClCompile") || is_source(rel)) wl_push(&sources, rel);
+        else if (!wcscmp(kind, L"ClInclude") || is_header(rel)) wl_push(&headers, rel);
+        else wl_push(&others, rel);
+    }
+
+    /* the Debug ItemDefinitionGroup, else the first, for the flat fields */
+    wchar_t debugGroup[16384]; debugGroup[0] = 0;
+    for (const wchar_t *p = wcsstr(xml, L"<ItemDefinitionGroup"); p;
+         p = wcsstr(p + 1, L"<ItemDefinitionGroup")) {
+        const wchar_t *close = wcsstr(p, L"</ItemDefinitionGroup>");
+        if (!close) break;
+        size_t len = (size_t)(close + 22 - p), bl = len < 16383 ? len : 16383;
+        wchar_t buf[16384];
+        wcsncpy(buf, p, bl); buf[bl] = 0;
+        if (!debugGroup[0]) nx_copy(debugGroup, 16384, buf);   /* first */
+        if (istr(buf, L"Debug|")) { nx_copy(debugGroup, 16384, buf); break; }
+    }
+
+    wchar_t cl[16384], link[16384];
+    block_literal(debugGroup, L"ClCompile", cl, 16384);
+    block_literal(debugGroup, L"Link", link, 16384);
+
+    wchar_t v[NX_PATH];
+    wlist rawInc = {0}, rawLibDirs = {0}, inc = {0}, dropInc = {0}, libDirs = {0}, dropLib = {0};
+    if (tag_text(cl, L"AdditionalIncludeDirectories", v, NX_PATH)) split_list(v, &rawInc);
+    if (tag_text(link, L"AdditionalLibraryDirectories", v, NX_PATH)) split_list(v, &rawLibDirs);
+    filter_paths(&rawInc, &inc, &dropInc);
+    filter_paths(&rawLibDirs, &libDirs, &dropLib);
+    for (int i = 0; i < dropInc.n; i++) { wchar_t w[NX_PATH]; _snwprintf(w, NX_PATH, L"Include path not imported (VS/SDK macro — Nexia adds the XDK paths itself): %ls", dropInc.v[i]); wl_push(&warnings, w); }
+    for (int i = 0; i < dropLib.n; i++) { wchar_t w[NX_PATH]; _snwprintf(w, NX_PATH, L"Library path not imported (VS/SDK macro — Nexia adds the XDK paths itself): %ls", dropLib.v[i]); wl_push(&warnings, w); }
+
+    wlist rawLibs = {0}, rawDefs = {0}, libs = {0}, defs = {0};
+    if (tag_text(link, L"AdditionalDependencies", v, NX_PATH)) split_list(v, &rawLibs);
+    if (tag_text(cl, L"PreprocessorDefinitions", v, NX_PATH)) split_list(v, &rawDefs);
+    for (int i = 0; i < rawDefs.n; i++) if (!vs_is_unresolvable_macro(rawDefs.v[i])) wl_push(&defs, rawDefs.v[i]);
+
+    /* the opening configuration's libraries feed the flat `libraries`. With no
+     * per-config parse wired to the flat field yet, this mirrors the fallback
+     * branch: rawLibs minus unresolvable. (The opening-config path arrives with
+     * project references, next commit.) */
+    for (int i = 0; i < rawLibs.n; i++) if (!vs_is_unresolvable_macro(rawLibs.v[i])) wl_push(&libs, rawLibs.v[i]);
+
+    wchar_t ctypeV[64];
+    const char *type = vs_map_configuration_type(tag_text(xml, L"ConfigurationType", ctypeV, 64) ? ctypeV : NULL);
+
+    /* pch */
+    wchar_t pfileV[NX_PATH], pmodeV[64], pch[NX_PATH]; int havePch = 0;
+    int hasFile = tag_text(cl, L"PrecompiledHeaderFile", pfileV, NX_PATH);
+    int hasMode = tag_text(cl, L"PrecompiledHeader", pmodeV, 64);
+    infer_pch(hasFile ? pfileV : NULL, hasMode ? pmodeV : NULL, &headers, pch, NX_PATH, &havePch);
+
+    /* flags */
+    wchar_t b1[16], b2[32], b3[32], b4[32], b5[16], b6[32];
+    int rtti = parse_bool(tag_text(cl, L"RuntimeTypeInfo", b1, 16) ? b1 : NULL);
+    const char *eh = vs_map_exceptions(tag_text(cl, L"ExceptionHandling", b2, 32) ? b2 : NULL);
+    const char *rt = vs_map_runtime_library(tag_text(cl, L"RuntimeLibrary", b3, 32) ? b3 : NULL);
+    int wl = vs_map_warning_level(tag_text(cl, L"WarningLevel", b4, 32) ? b4 : NULL);
+    int twae = parse_bool(tag_text(cl, L"TreatWarningAsError", b5, 16) ? b5 : NULL);
+    const char *opt = vs_map_optimization(tag_text(cl, L"Optimization", b6, 32) ? b6 : NULL);
+
+    wchar_t nameV[NX_PATH], name[NX_PATH];
+    if (tag_text(xml, L"ProjectName", nameV, NX_PATH) && nameV[0]) nx_copy(name, NX_PATH, nameV);
+    else base_stem(projPath, name, NX_PATH);
+
+    printf("{\"ok\":true,");
+    printf("\"name\":");        nx_json_str(stdout, name);     printf(",");
+    printf("\"projectPath\":"); nx_json_str(stdout, projPath); printf(",");
+    printf("\"format\":\"vcxproj\",");
+    printf("\"projectReferences\":[],");
+    printf("\"configurations\":{");
+    int firstCfg = 1;
+    for (int i = 0; i < 4; i++) parse_config_group(xml, VS_CONFIGS[i], stdout, &firstCfg);
+    printf("},");
+    printf("\"sources\":");   emit_wl(stdout, &sources); printf(",");
+    printf("\"headers\":");   emit_wl(stdout, &headers); printf(",");
+    printf("\"otherFiles\":");emit_wl(stdout, &others);  printf(",");
+    emit_flags(stdout, type, &inc, &libDirs, &libs, &defs, pch, havePch,
+               rtti, eh, rt, wl, twae, opt, &warnings);
+    printf("}\n");
+
+    wl_free(&sources); wl_free(&headers); wl_free(&others); wl_free(&warnings);
+    wl_free(&rawInc); wl_free(&rawLibDirs); wl_free(&inc); wl_free(&dropInc);
+    wl_free(&libDirs); wl_free(&dropLib); wl_free(&rawLibs); wl_free(&rawDefs);
+    wl_free(&libs); wl_free(&defs);
+    free(xml);
+    return 0;
+}
+
 /* ── the CLI, for the parity test ─────────────────────────────────────────── */
 
 /*
@@ -799,6 +1087,13 @@ int nx_cmd_vsimport(int argc, wchar_t **argv)
     if (!wcscmp(argv[0], L"vcproj")) {
         if (argc < 2) { nx_json_error("vsimport vcproj: expected <path.vcproj>"); return 2; }
         return parse_vcproj(argv[1]);
+    }
+
+    if (!wcscmp(argv[0], L"vcxproj")) {
+        if (argc < 2) { nx_json_error("vsimport vcxproj: expected <path.vcxproj> [--sdk <root>]"); return 2; }
+        const wchar_t *sdk = NULL;
+        for (int i = 2; i + 1 < argc; i += 2) if (!wcscmp(argv[i], L"--sdk")) sdk = argv[i + 1];
+        return parse_vcxproj(argv[1], sdk);
     }
 
     nx_json_error("vsimport: unknown subcommand");
