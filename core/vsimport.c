@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <wctype.h>
+#include <stdarg.h>
 
 /* ── small wide-string helpers ────────────────────────────────────────────── */
 
@@ -375,9 +376,35 @@ static void wl_push(wlist *l, const wchar_t *s)
 {
     if (l->n == l->cap) {
         l->cap = l->cap ? l->cap * 2 : 8;
-        l->v = (wchar_t **)realloc(l->v, (size_t)l->cap * sizeof(wchar_t *));
+        wchar_t **nv = (wchar_t **)realloc(l->v, (size_t)l->cap * sizeof(wchar_t *));
+        if (!nv) { fwprintf(stderr, L"nexia-core: out of memory\n"); exit(3); }
+        l->v = nv;
     }
-    l->v[l->n++] = _wcsdup(s);
+    wchar_t *dup = _wcsdup(s);
+    if (!dup) { fwprintf(stderr, L"nexia-core: out of memory\n"); exit(3); }
+    l->v[l->n++] = dup;
+}
+
+/*
+ * Push a formatted warning, always NUL-terminated.
+ *
+ * The warnings interpolate a path up to NX_PATH-1 chars, and one of them
+ * interpolates the reference name three times, so the naive
+ * `_snwprintf(w, NX_PATH, ...)` both truncated and — because MSVC's _snwprintf
+ * does not terminate on truncation — left the buffer unterminated for wl_push's
+ * _wcsdup/wcslen to walk off the end of. A crafted .vcxproj with a ~1000-char
+ * unresolved-macro path reaches this. The buffer is sized past any interpolation
+ * and terminated explicitly.
+ */
+static void warnf(wlist *l, const wchar_t *fmt, ...)
+{
+    wchar_t buf[NX_PATH * 4];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnwprintf(buf, NX_PATH * 4, fmt, ap);
+    va_end(ap);
+    buf[NX_PATH * 4 - 1] = 0;
+    wl_push(l, buf);
 }
 
 static void wl_free(wlist *l)
@@ -672,8 +699,8 @@ static int parse_vcproj(const wchar_t *projPath)
         /* strip a leading .\ or ./ (already backslashed by to_host_path) */
         if (rel[0] == L'.' && rel[1] == L'\\') memmove(rel, rel + 2, (wcslen(rel + 2) + 1) * sizeof(wchar_t));
         if (vs_is_unresolvable_macro(rel)) {
-            wchar_t w[NX_PATH]; _snwprintf(w, NX_PATH, L"Skipped item with unresolved macro: %ls", rel);
-            wl_push(&warnings, w); continue;
+            warnf(&warnings, L"Skipped item with unresolved macro: %ls", rel);
+            continue;
         }
         if (is_source(rel)) wl_push(&sources, rel);
         else if (is_header(rel)) wl_push(&headers, rel);
@@ -697,8 +724,8 @@ static int parse_vcproj(const wchar_t *projPath)
     wlist inc = {0}, dropInc = {0}, libDirs = {0}, dropLib = {0};
     filter_paths(&rawInc, &inc, &dropInc);
     filter_paths(&rawLibDirs, &libDirs, &dropLib);
-    for (int i = 0; i < dropInc.n; i++) { wchar_t w[NX_PATH]; _snwprintf(w, NX_PATH, L"Include path not imported (VS/SDK macro): %ls", dropInc.v[i]); wl_push(&warnings, w); }
-    for (int i = 0; i < dropLib.n; i++) { wchar_t w[NX_PATH]; _snwprintf(w, NX_PATH, L"Library path not imported (VS/SDK macro): %ls", dropLib.v[i]); wl_push(&warnings, w); }
+    for (int i = 0; i < dropInc.n; i++) warnf(&warnings, L"Include path not imported (VS/SDK macro): %ls", dropInc.v[i]);
+    for (int i = 0; i < dropLib.n; i++) warnf(&warnings, L"Library path not imported (VS/SDK macro): %ls", dropLib.v[i]);
 
     /* libraries: drop unresolvable */
     wlist libs = {0};
@@ -1111,8 +1138,8 @@ static int parse_vcxproj(const wchar_t *projPath, const wchar_t *sdkRoot)
         nx_copy(rel, NX_PATH, rawInc);
         to_host_path(rel);
         if (vs_is_unresolvable_macro(rel)) {
-            wchar_t w[NX_PATH]; _snwprintf(w, NX_PATH, L"Skipped item with unresolved macro: %ls", rawInc);
-            wl_push(&warnings, w); continue;
+            warnf(&warnings, L"Skipped item with unresolved macro: %ls", rawInc);
+            continue;
         }
         if (!wcscmp(kind, L"ClCompile") || is_source(rel)) wl_push(&sources, rel);
         else if (!wcscmp(kind, L"ClInclude") || is_header(rel)) wl_push(&headers, rel);
@@ -1142,8 +1169,8 @@ static int parse_vcxproj(const wchar_t *projPath, const wchar_t *sdkRoot)
     if (tag_text(link, L"AdditionalLibraryDirectories", v, NX_PATH)) split_list(v, &rawLibDirs);
     filter_paths(&rawInc, &inc, &dropInc);
     filter_paths(&rawLibDirs, &flatLibDirs, &dropLib);
-    for (int i = 0; i < dropInc.n; i++) { wchar_t w[NX_PATH]; _snwprintf(w, NX_PATH, L"Include path not imported (VS/SDK macro — Nexia adds the XDK paths itself): %ls", dropInc.v[i]); wl_push(&warnings, w); }
-    for (int i = 0; i < dropLib.n; i++) { wchar_t w[NX_PATH]; _snwprintf(w, NX_PATH, L"Library path not imported (VS/SDK macro — Nexia adds the XDK paths itself): %ls", dropLib.v[i]); wl_push(&warnings, w); }
+    for (int i = 0; i < dropInc.n; i++) warnf(&warnings, L"Include path not imported (VS/SDK macro — Nexia adds the XDK paths itself): %ls", dropInc.v[i]);
+    for (int i = 0; i < dropLib.n; i++) warnf(&warnings, L"Library path not imported (VS/SDK macro — Nexia adds the XDK paths itself): %ls", dropLib.v[i]);
 
     wlist rawLibs = {0}, rawDefs = {0}, defs = {0};
     if (tag_text(link, L"AdditionalDependencies", v, NX_PATH)) split_list(v, &rawLibs);
@@ -1172,13 +1199,11 @@ static int parse_vcxproj(const wchar_t *projPath, const wchar_t *sdkRoot)
             if (!r->isStaticLibrary) continue;
             if (!r->haveLib) {
                 if (r->exists && wcscmp(VS_CONFIGS[ci], L"Debug")) {
-                    wchar_t w[NX_PATH * 2];
-                    _snwprintf(w, NX_PATH * 2,
+                    warnf(&warnings,
                         L"%ls: your SDK has no %ls build of \"%ls\", so it isn't linked for that "
                         L"configuration. Only a problem if your code calls into %ls — build it for "
                         L"%ls in Visual Studio if so.",
                         VS_CONFIGS[ci], VS_CONFIGS[ci], r->name, r->name, VS_CONFIGS[ci]);
-                    wl_push(&warnings, w);
                 }
                 continue;
             }
@@ -1199,15 +1224,11 @@ static int parse_vcxproj(const wchar_t *projPath, const wchar_t *sdkRoot)
         vs_ref *r = &dbgRefs[i];
         if (!r->isStaticLibrary) continue;
         if (!r->exists) {
-            wchar_t w[NX_PATH * 2];
-            _snwprintf(w, NX_PATH * 2, L"Referenced project not found on disk, so its library can't be linked: %ls", r->path);
-            wl_push(&warnings, w);
+            warnf(&warnings, L"Referenced project not found on disk, so its library can't be linked: %ls", r->path);
         } else if (!r->haveLib) {
-            wchar_t w[NX_PATH * 2];
-            _snwprintf(w, NX_PATH * 2,
+            warnf(&warnings,
                 L"\"%ls\" is referenced as a static library but its built .lib wasn't found. "
                 L"Build it in Visual Studio (Debug configuration) and re-import, or the link will fail.", r->name);
-            wl_push(&warnings, w);
         }
     }
 

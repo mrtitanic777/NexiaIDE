@@ -20,6 +20,24 @@
 
 static void *sz(size_t n) { void *m = calloc(1, n); if (!m) { fwprintf(stderr, L"oom\n"); exit(3); } return m; }
 
+/*
+ * WideCharToMultiByte into a fixed buffer, always NUL-terminated.
+ *
+ * The bare API leaves the destination undefined when the source does not fit
+ * (ERROR_INSUFFICIENT_BUFFER), and every caller here immediately strlen()s or
+ * urlenc()s the result — an unbounded read of stack garbage, and for a query it
+ * would be percent-encoded straight into the outgoing URL. Returns 0 with an
+ * empty string when the source is too long, so an over-long query or key becomes
+ * "nothing" rather than a crash or a stack-memory disclosure.
+ */
+static int w2u8(char *dst, int cap, const wchar_t *src)
+{
+    int n = WideCharToMultiByte(CP_UTF8, 0, src ? src : L"", -1, dst, cap, NULL, NULL);
+    if (n <= 0) { dst[0] = 0; return 0; }
+    dst[cap - 1] = 0;
+    return 1;
+}
+
 /* ── string helpers, matching searchService.ts ────────────────────────────── */
 
 /* decodeEntities: &#d; &#xh; &quot; &apos; &lt; &gt; and &amp; last. In place;
@@ -228,8 +246,17 @@ static void urlenc(const char *s, char *out, size_t cap)
     out[o] = 0;
 }
 
-/* redact: scrub key/token query values out of a message. */
-static void redact(char *s)
+/*
+ * redact: scrub key/token query values out of a message, in a buffer of `cap`.
+ *
+ * The replacement ("[redacted]", 10 bytes) can be longer than the value it
+ * replaces, so this GROWS the string — and without a bound that memmove can walk
+ * off the end of a fixed buffer. An error message from a hostile endpoint
+ * containing "?key=x" near the 512-byte boundary is a stack overflow driven by
+ * network content, which is why `cap` is threaded through and every shift is
+ * clamped to it.
+ */
+static void redact(char *s, size_t cap)
 {
     for (char *p = s; *p; p++) {
         if ((*p == '?' || *p == '&') &&
@@ -238,11 +265,20 @@ static void redact(char *s)
             char *e = v;
             while (*e && *e != '&') e++;
             const char *rep = "[redacted]";
-            size_t rl = strlen(rep), vl = (size_t)(e - v);
-            memmove(v + rl, e, strlen(e) + 1);
+            size_t rl = strlen(rep);
+            size_t voff = (size_t)(v - s), tail = strlen(e);
+            /* need room for: v-prefix + rep + tail + NUL */
+            if (voff + rl + tail + 1 > cap) {
+                /* would overflow — truncate: drop the value, keep what fits */
+                size_t room = voff < cap ? cap - voff - 1 : 0;
+                size_t w = rl < room ? rl : room;
+                memcpy(v, rep, w);
+                v[w] = 0;
+                return;
+            }
+            memmove(v + rl, e, tail + 1);
             memcpy(v, rep, rl);
             p = v + rl - 1;
-            (void)vl;
         }
     }
 }
@@ -263,7 +299,7 @@ static void explain(long status, const char *reason, const char *apiMsg, const c
         snprintf(out, cap, "No connection to the internet.");   /* transport failure */
     else
         snprintf(out, cap, "%s", apiMsg ? apiMsg : "");
-    redact(out);
+    redact(out, cap);
 }
 
 /* emit {success:false, error, needsKey?} */
@@ -300,10 +336,10 @@ static jv *fetch_json(const wchar_t *url, const wchar_t **hdrs, int nh, const ch
             static char am[512], rs[128];
             const wchar_t *m = jv_get_str(e, L"message", NULL);
             if (!m) m = jv_get_str(root, L"message", NULL);
-            if (m) { WideCharToMultiByte(CP_UTF8, 0, m, -1, am, 512, NULL, NULL); apiMsg = am; }
+            if (m) { w2u8(am, 512, m); apiMsg = am; }
             const jv *errs = jv_get(e, L"errors");
             const wchar_t *r0 = jv_get_str(jv_at(errs, 0), L"reason", NULL);
-            if (r0) { WideCharToMultiByte(CP_UTF8, 0, r0, -1, rs, 128, NULL, NULL); reason = rs; }
+            if (r0) { w2u8(rs, 128, r0); reason = rs; }
         }
         char msg[512];
         if (!apiMsg) { char code[32]; snprintf(code, 32, "HTTP %ld", resp.status); explain(resp.status, reason, code, provider, msg, 512); }
@@ -321,14 +357,14 @@ static jv *fetch_json(const wchar_t *url, const wchar_t **hdrs, int nh, const ch
 
 static int live_youtube(const wchar_t *key, const wchar_t *query, int max)
 {
-    char q[1024]; WideCharToMultiByte(CP_UTF8, 0, query ? query : L"", -1, q, 1024, NULL, NULL);
+    char q[4096]; w2u8(q, 4096, query);
     /* trim */
     char *qs = q; while (*qs == ' ') qs++;
     char *qe = qs + strlen(qs); while (qe > qs && qe[-1] == ' ') *--qe = 0;
     if (!*qs) { printf("{\"success\":true,\"results\":[]}\n"); return 0; }
     if (!key || !key[0]) { emit_error("Video search needs a YouTube Data API key.", 1); return 0; }
 
-    char keyU8[512]; WideCharToMultiByte(CP_UTF8, 0, key, -1, keyU8, 512, NULL, NULL);
+    char keyU8[1024]; w2u8(keyU8, 1024, key);
     char qenc[3072], kenc[1536];
     urlenc(qs, qenc, 3072); urlenc(keyU8, kenc, 1536);
     int m = max < 1 ? 1 : max > 50 ? 50 : max;
@@ -347,7 +383,7 @@ static int live_youtube(const wchar_t *key, const wchar_t *query, int max)
 
 static int live_web(const wchar_t *provider, const wchar_t *key, const wchar_t *engineId, const wchar_t *query)
 {
-    char q[1024]; WideCharToMultiByte(CP_UTF8, 0, query ? query : L"", -1, q, 1024, NULL, NULL);
+    char q[4096]; w2u8(q, 4096, query);
     char *qs = q; while (*qs == ' ') qs++;
     char *qe = qs + strlen(qs); while (qe > qs && qe[-1] == 0x20) *--qe = 0;
     if (!*qs) { printf("{\"success\":true,\"results\":[]}\n"); return 0; }
@@ -363,14 +399,14 @@ static int live_web(const wchar_t *provider, const wchar_t *key, const wchar_t *
         return 0;
     }
 
-    char keyU8[1536]; WideCharToMultiByte(CP_UTF8, 0, key, -1, keyU8, 1536, NULL, NULL);
+    char keyU8[2048]; w2u8(keyU8, 2048, key);
     char qenc[3072]; urlenc(qs, qenc, 3072);
 
     if (brave) {
         char url[8192];
         snprintf(url, 8192, "https://api.search.brave.com/res/v1/web/search?count=20&q=%s", qenc);
         wchar_t wurl[8192]; MultiByteToWideChar(CP_UTF8, 0, url, -1, wurl, 8192);
-        wchar_t hdr[1600]; _snwprintf(hdr, 1600, L"X-Subscription-Token: %ls", key);
+        wchar_t hdr[2048]; _snwprintf(hdr, 2048, L"X-Subscription-Token: %ls", key); hdr[2047] = 0;
         const wchar_t *hdrs[1] = { hdr };
         jv *root = fetch_json(wurl, hdrs, 1, "Brave Search");
         if (!root) return 0;
@@ -379,12 +415,12 @@ static int live_web(const wchar_t *provider, const wchar_t *key, const wchar_t *
         return 0;
     }
 
-    char kenc[2048], cxenc[1024], cxU8[512];
-    WideCharToMultiByte(CP_UTF8, 0, engineId, -1, cxU8, 512, NULL, NULL);
-    urlenc(keyU8, kenc, 2048); urlenc(cxU8, cxenc, 1024);
-    char url[8192];
-    snprintf(url, 8192, "https://www.googleapis.com/customsearch/v1?key=%s&cx=%s&num=10&q=%s", kenc, cxenc, qenc);
-    wchar_t wurl[8192]; MultiByteToWideChar(CP_UTF8, 0, url, -1, wurl, 8192);
+    char kenc[6144], cxenc[1536], cxU8[512];
+    w2u8(cxU8, 512, engineId);
+    urlenc(keyU8, kenc, 6144); urlenc(cxU8, cxenc, 1536);
+    char url[16384];
+    snprintf(url, 16384, "https://www.googleapis.com/customsearch/v1?key=%s&cx=%s&num=10&q=%s", kenc, cxenc, qenc);
+    wchar_t wurl[16384]; MultiByteToWideChar(CP_UTF8, 0, url, -1, wurl, 16384);
     jv *root = fetch_json(wurl, NULL, 0, "Google");
     if (!root) return 0;
     map_google(root, stdout);

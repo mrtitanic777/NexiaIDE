@@ -126,6 +126,11 @@ static void jp_push(jv *v, wchar_t *key, jv *child)
         jv **ni = (jv **)jz((size_t)cap * sizeof(jv *));
         wchar_t **nk = (wchar_t **)jz((size_t)cap * sizeof(wchar_t *));
         for (int i = 0; i < v->count; i++) { ni[i] = v->items[i]; nk[i] = v->keys[i]; }
+        /* free the old blocks, not just the entries they held — a resident
+         * caller (the native UI jv_free exists for) would otherwise leak one
+         * block per growth of every array and object it parses. */
+        free(v->items);
+        free(v->keys);
         v->items = ni;
         v->keys = nk;
     }
@@ -144,12 +149,13 @@ static jv *jp_array(jp *s)
 
     for (;;) {
         jv *item = jp_value(s);
-        if (!item) return NULL;
+        if (!item) { jv_free(v); return NULL; }
         jp_push(v, NULL, item);
         jp_ws(s);
         if (s->p < s->end && *s->p == L',') { s->p++; jp_ws(s); continue; }
         if (s->p < s->end && *s->p == L']') { s->p++; return v; }
         s->err = "expected ',' or ']' in array";
+        jv_free(v);
         return NULL;
     }
 }
@@ -165,17 +171,18 @@ static jv *jp_object(jp *s)
     for (;;) {
         jp_ws(s);
         wchar_t *key = jp_string(s);
-        if (!key) return NULL;
+        if (!key) { jv_free(v); return NULL; }
         jp_ws(s);
-        if (s->p >= s->end || *s->p != L':') { s->err = "expected ':' after key"; return NULL; }
+        if (s->p >= s->end || *s->p != L':') { s->err = "expected ':' after key"; free(key); jv_free(v); return NULL; }
         s->p++;
         jv *item = jp_value(s);
-        if (!item) return NULL;
+        if (!item) { free(key); jv_free(v); return NULL; }
         jp_push(v, key, item);
         jp_ws(s);
         if (s->p < s->end && *s->p == L',') { s->p++; continue; }
         if (s->p < s->end && *s->p == L'}') { s->p++; return v; }
         s->err = "expected ',' or '}' in object";
+        jv_free(v);
         return NULL;
     }
 }
@@ -205,16 +212,23 @@ static jv *jp_object(jp *s)
  */
 static jv *jp_number(jp *s)
 {
-    char buf[64];
+    char buf[512];
     size_t n = 0;
     const wchar_t *q = s->p;
-    while (q < s->end && n + 1 < sizeof buf) {
+    int overflow = 0;
+    while (q < s->end) {
         wchar_t c = *q;
-        if ((c >= L'0' && c <= L'9') || c == L'-' || c == L'+' ||
-            c == L'.' || c == L'e' || c == L'E') { buf[n++] = (char)c; q++; }
-        else break;
+        int isnum = (c >= L'0' && c <= L'9') || c == L'-' || c == L'+' ||
+                    c == L'.' || c == L'e' || c == L'E';
+        if (!isnum) break;
+        if (n + 1 >= sizeof buf) { overflow = 1; break; }   /* absurd literal */
+        buf[n++] = (char)c; q++;
     }
     buf[n] = 0;
+    /* A number token that does not fit is malformed input, not a value to
+     * silently truncate and reparse as more JSON. nexia.json's numbers are tiny;
+     * a 500-digit literal is a hand-edit gone wrong. */
+    if (overflow) { s->err = "number too long"; return NULL; }
 
     char *stop = NULL;
     double d = strtod(buf, &stop);
@@ -516,7 +530,8 @@ void jv_write(FILE *f, const jv *v, int indent)
  */
 void jv_set_str(jv *obj, const wchar_t *key, const wchar_t *val)
 {
-    if (!obj || obj->type != JV_OBJ) return;
+    if (!obj || obj->type != JV_OBJ || !key) return;
+    if (!val) val = L"";   /* tolerate NULL like the jv_*_or accessors do */
 
     size_t vn = (wcslen(val) + 1) * sizeof(wchar_t);
 

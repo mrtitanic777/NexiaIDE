@@ -39,9 +39,13 @@ int nx_http_get(const wchar_t *url, const wchar_t **headers, int nheaders, nx_ht
     URL_COMPONENTS uc;
     memset(&uc, 0, sizeof uc);
     uc.dwStructSize = sizeof uc;
-    wchar_t host[256], path[2048];
+    /* path holds path+query combined (no lpszExtraInfo set), and the query can be
+     * a long encoded search string — search.c builds URLs into a 16 KB buffer —
+     * so this must be at least as large or WinHttpCrackUrl fails a valid long
+     * query with a misleading "bad URL". */
+    wchar_t host[256], path[16384];
     uc.lpszHostName = host; uc.dwHostNameLength = 256;
-    uc.lpszUrlPath = path; uc.dwUrlPathLength = 2048;
+    uc.lpszUrlPath = path; uc.dwUrlPathLength = 16384;
     if (!WinHttpCrackUrl(url, 0, 0, &uc)) {
         _snwprintf(out->err, 256, L"bad URL"); return 0;
     }
@@ -69,8 +73,12 @@ int nx_http_get(const wchar_t *url, const wchar_t **headers, int nheaders, nx_ht
      * searchService's getJson so a provider sees the same request. */
     WinHttpAddRequestHeaders(r, L"Accept: application/json\r\n", (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD);
     for (int i = 0; i < nheaders; i++) {
-        wchar_t line[1024];
-        _snwprintf(line, 1024, L"%ls\r\n", headers[i]);
+        wchar_t line[2100];
+        /* _snwprintf does not NUL-terminate on truncation, and this is handed to
+         * WinHttpAddRequestHeaders with length -1, which would then read past the
+         * buffer. Force the terminator. */
+        _snwprintf(line, 2100, L"%ls\r\n", headers[i]);
+        line[2099] = 0;
         WinHttpAddRequestHeaders(r, line, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
     }
 

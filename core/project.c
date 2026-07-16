@@ -136,7 +136,9 @@ void nx_safe_filename(const wchar_t *name, wchar_t *out, size_t cap)
 static char *to_u8(const wchar_t *w)
 {
     int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
-    if (n <= 0) return NULL;
+    /* never NULL: a conversion failure yields "" so no caller (find_template's
+     * strcmp, upper_u8's walk) dereferences a null. OOM exits via bz. */
+    if (n <= 0) { char *e = (char *)bz(1); return e; }
     char *s = (char *)bz((size_t)n);
     WideCharToMultiByte(CP_UTF8, 0, w, -1, s, n, NULL, NULL);
     return s;
@@ -145,21 +147,30 @@ static char *to_u8(const wchar_t *w)
 static wchar_t *to_w(const char *s)
 {
     int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
-    if (n <= 0) return NULL;
+    if (n <= 0) { wchar_t *e = (wchar_t *)bz(sizeof(wchar_t)); return e; }
     wchar_t *w = (wchar_t *)bz((size_t)n * sizeof(wchar_t));
     MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
     return w;
 }
 
-/* replace-all, returning a fresh buffer. */
+/* strdup that exits on OOM, so replace_all/expand never return NULL. */
+static char *dup_u8(const char *s)
+{
+    size_t n = strlen(s) + 1;
+    char *d = (char *)bz(n);
+    memcpy(d, s, n);
+    return d;
+}
+
+/* replace-all, returning a fresh buffer (never NULL). */
 static char *replace_all(const char *s, const char *find, const char *with)
 {
     size_t lf = strlen(find), lw = strlen(with);
-    if (!lf) return _strdup(s);
+    if (!lf) return dup_u8(s);
 
     size_t hits = 0;
     for (const char *p = s; (p = strstr(p, find)); p += lf) hits++;
-    if (!hits) return _strdup(s);
+    if (!hits) return dup_u8(s);
 
     char *out = (char *)bz(strlen(s) + hits * (lw > lf ? lw - lf : 0) + 1);
     char *o = out;
@@ -364,6 +375,9 @@ static int cmd_create(int argc, wchar_t **argv)
      * could not simply try again afterwards.
      */
     wchar_t sdkSrc[8][NX_PATH];
+    /* No shipped template exceeds 3 sdkFiles, but fail loudly rather than
+     * silently dropping files 9+ if the generated table ever grows past 8. */
+    if (t->nsdk_files > 8) { nx_json_error("project create: template has more sdkFiles than supported"); return 2; }
     if (t->nsdk_files > 0) {
         if (!sdkRoot) {
             printf("{\"ok\":false,\"error\":\"The %s template copies its content from the Xbox 360 SDK, "
@@ -447,7 +461,7 @@ static int cmd_create(int argc, wchar_t **argv)
     nx_safe_name(name, wSafe, NX_PATH);
     nx_safe_filename(name, wFile, NX_PATH);
     char *safeName = to_u8(wSafe), *fileName = to_u8(wFile);
-    char *upper = _strdup(safeName);
+    char *upper = dup_u8(safeName);
     upper_u8(upper);
 
     wchar_t projFull[NX_PATH];
@@ -509,12 +523,17 @@ static int cmd_create(int argc, wchar_t **argv)
     char *u8name = to_u8(name), *u8path = to_u8(projDir);
 
     /* Expanded, as the TypeScript does — sourceFiles carry __PROJECT__ and the
-     * DLL template's defines carry __PROJECT_UPPER___EXPORTS. */
+     * DLL template's defines carry __PROJECT_UPPER___EXPORTS. The counts emitted
+     * are the clamped fill counts, not the raw template counts: passing
+     * t->nsource_files to arr_u8 while filling only 16 slots would read
+     * uninitialised stack for a template with more (none ship with >2, but the
+     * clamp-on-fill/uncapped-on-read split is a landmine either way). */
     const char *src[16], *def[16];
-    for (int i = 0; i < t->nsource_files && i < 16; i++)
-        src[i] = expand(t->source_files[i], fileName, safeName, upper);
-    for (int i = 0; i < t->ndefines && i < 16; i++)
-        def[i] = expand(t->defines[i], fileName, safeName, upper);
+    int nsrc = 0, ndef = 0;
+    for (int i = 0; i < t->nsource_files && nsrc < 16; i++)
+        src[nsrc++] = expand(t->source_files[i], fileName, safeName, upper);
+    for (int i = 0; i < t->ndefines && ndef < 16; i++)
+        def[ndef++] = expand(t->defines[i], fileName, safeName, upper);
 
     /* A template's own include directories are kept, not replaced. Set semantics
      * and insertion order: 'include', 'src', then anything the template adds
@@ -532,11 +551,11 @@ static int cmd_create(int argc, wchar_t **argv)
     ind(f, 1); fprintf(f, "\"path\": ");     nx_json_str_u8(f, u8path); fprintf(f, ",\n");
     ind(f, 1); fprintf(f, "\"type\": ");     nx_json_str_u8(f, t->type); fprintf(f, ",\n");
     ind(f, 1); fprintf(f, "\"template\": "); nx_json_str_u8(f, t->template_id); fprintf(f, ",\n");
-    arr_u8(f, 1, "sourceFiles", src, t->nsource_files, 1);
+    arr_u8(f, 1, "sourceFiles", src, nsrc, 1);
     arr_u8(f, 1, "includeDirectories", inc, ninc, 1);
     arr_u8(f, 1, "libraryDirectories", NULL, 0, 1);
     arr_u8(f, 1, "libraries", t->libraries, t->nlibraries, 1);
-    arr_u8(f, 1, "defines", def, t->ndefines, 1);
+    arr_u8(f, 1, "defines", def, ndef, 1);
     ind(f, 1); fprintf(f, "\"configuration\": \"Debug\",\n");
     ind(f, 1); fprintf(f, "\"pchHeader\": \"stdafx.h\"");
 
