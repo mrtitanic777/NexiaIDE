@@ -5638,15 +5638,41 @@ function userInitial(user: { username?: string; email?: string } | null): string
     return (Array.from(source)[0] || '?').toUpperCase();
 }
 
+type AvatarSubject = { id?: string; email?: string; avatarUrl?: string } | null;
+
+/**
+ * Is this the person sitting at this machine?
+ *
+ * By id while signed in. When nobody is signed in, the only person we ever draw
+ * is the last account that used this copy — the welcome-back prompt — so match
+ * that by email, which is all LastAccount stores.
+ */
+function isCurrentUser(user: AvatarSubject): boolean {
+    if (!user) return false;
+    const me = authService.getUser();
+    if (me) return !!user.id && user.id === me.id;
+    const last = authService.getLastAccount();
+    return !!(last && user.email && user.email === last.email);
+}
+
 /**
  * The image to show for a user, or null to fall back to their initial.
  *
- * A locally uploaded picture wins over the server's: it is the one the user
- * chose in this copy of the IDE, and it should not be silently overridden by
- * whatever their account or linked Discord happens to carry.
+ * The locally uploaded picture belongs to exactly one person: whoever uploaded
+ * it here. This used to hand it back for anybody it was asked about, so the
+ * developer panel — the one screen that draws other people — painted the local
+ * user's face onto all ten rows. Nothing was ever written to those accounts:
+ * the list asked "what picture for this user?" and got the same answer every
+ * time, because the question's argument was ignored.
+ *
+ * A local upload still wins for its owner. It is the one they chose in this copy
+ * of the IDE, and should not be overridden by whatever their account or linked
+ * Discord happens to carry.
  */
-function userAvatarSrc(user: { avatarUrl?: string } | null): string | null {
-    return userSettings.avatarDataUrl || user?.avatarUrl || null;
+function userAvatarSrc(user: AvatarSubject): string | null {
+    if (!user) return null;
+    if (userSettings.avatarDataUrl && isCurrentUser(user)) return userSettings.avatarDataUrl;
+    return user.avatarUrl || null;
 }
 
 /**
