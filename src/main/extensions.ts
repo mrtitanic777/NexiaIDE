@@ -241,6 +241,18 @@ export class ExtensionManager {
      */
     createTemplate(name: string, type: ExtensionManifest['type']): string {
         const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+        // A name with nothing alphanumeric in it — "!!!", "___", an emoji —
+        // slugs to the empty string, and path.join(extensionsDir, '') is the
+        // extensions directory itself. That wrote manifest.json and README.md
+        // into the root of every extension, and the next createTemplate
+        // overwrote them. Refuse instead: there is no id here to install under.
+        if (!id) {
+            throw new Error(
+                `"${name}" has no letters or numbers in it, so it can't be turned into an extension id. ` +
+                `Give it a name with at least one letter or digit.`);
+        }
+
         const extDir = path.join(this.extensionsDir, id);
         fs.mkdirSync(extDir, { recursive: true });
 

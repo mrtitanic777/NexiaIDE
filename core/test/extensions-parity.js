@@ -26,8 +26,20 @@ const newHome = (tag) => {
 };
 
 // Both sides resolve the home the same way, so the env is the only thing set.
-const core = (home, args) =>
-    JSON.parse(execFileSync(EXE, args, { encoding: 'utf8', env: { ...process.env, USERPROFILE: home } }));
+/*
+ * `mayFail` is for the cases where refusing IS the correct answer: nexia-core
+ * exits non-zero and execFileSync throws, but the JSON on stdout is still what
+ * we came for.
+ */
+const core = (home, args, mayFail) => {
+    const opts = { encoding: 'utf8', env: { ...process.env, USERPROFILE: home } };
+    try {
+        return JSON.parse(execFileSync(EXE, args, opts));
+    } catch (e) {
+        if (mayFail && e.stdout) return JSON.parse(e.stdout);
+        throw e;
+    }
+};
 const mgr = (home) => { process.env.USERPROFILE = home; return new ExtensionManager(); };
 const extdir = (home) => path.join(home, '.nexia-ide', 'extensions');
 
@@ -87,7 +99,7 @@ const fixture = (id, name) => {
             ['My Cool Tool!', 'tool'], ['ALLCAPS', 'template'], ['  spaced  out  ', 'snippet'],
             ['---dashes---', 'theme'], ['mixed123Numbers', 'library'], ['Ünïcödé Näme', 'plugin'],
             ['quote"and\\slash', 'tool'], ['KELVIN', 'tool'], ['İstanbul', 'tool'],
-            ['unknown-type-icon', 'wat'], ['a', 'tool'], ['!!!', 'tool'],
+            ['unknown-type-icon', 'wat'], ['a', 'tool'],
         ]) {
             const th = newHome('t-ts'), ch = newHome('t-c');
             const tsDir = mgr(th).createTemplate(name, type);
@@ -103,6 +115,24 @@ const fixture = (id, name) => {
             const t1 = tree(extdir(th)), t2 = tree(extdir(ch));
             check(`  files ${JSON.stringify(name)}`, JSON.stringify(t1) === JSON.stringify(t2),
                 `\n      ts: ${JSON.stringify(t1)}\n      c:  ${JSON.stringify(t2)}`);
+        }
+
+        // A name with nothing alphanumeric in it used to slug to "", and
+        // path.join(extensionsDir, "") is the extensions directory itself — so
+        // manifest.json and README.md were written into the root and the next
+        // template overwrote them. Both sides refuse now. This case was in the
+        // loop above asserting that they agreed on doing the wrong thing.
+        {
+            const th = newHome('t-bad'), ch = newHome('c-bad');
+            let tsThrew = false;
+            try { mgr(th).createTemplate('!!!', 'tool'); } catch { tsThrew = true; }
+            const cRes = core(ch, ['extensions', 'template', '!!!', 'tool'], true);
+            check('"!!!" — TypeScript refuses', tsThrew, 'it did not throw');
+            check('"!!!" — C refuses', cRes.ok === false, JSON.stringify(cRes));
+            check('"!!!" — nothing written to the root',
+                  Object.keys(tree(extdir(ch))).length === 0 && Object.keys(tree(extdir(th))).length === 0,
+                  'files appeared: ts=' + JSON.stringify(Object.keys(tree(extdir(th)))) +
+                  ' c=' + JSON.stringify(Object.keys(tree(extdir(ch)))));
         }
 
         console.log('');

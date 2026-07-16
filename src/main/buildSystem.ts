@@ -11,6 +11,51 @@ import { Toolchain } from './toolchain';
 import { BuildConfig, BuildResult, BuildMessage, ProjectConfig, BuildConfiguration } from '../shared/types';
 
 /**
+ * Decode what an SDK tool wrote to its pipe.
+ *
+ * Not Buffer.toString(), which assumes UTF-8. These tools are MSVC 2010 and
+ * emit the console's OEM code page. That is measurable rather than arguable:
+ * compile a file called "café.cpp" and cl.exe echoes the name back with 0x82
+ * where the é is — cp437. UTF-8 turns that byte into U+FFFD and the file name
+ * in the diagnostic no longer matches any file on disk.
+ *
+ * Everything ASCII decodes identically under every candidate, which is why this
+ * survived: it only breaks for people whose paths or identifiers aren't
+ * English, who are also the least likely to be believed when they report it.
+ *
+ * Node ships no cp437 decoder and none can be added — a dependency for one
+ * table is a poor trade — so the high half is spelled out. Other OEM pages (850
+ * in Western Europe, 932 in Japan) fall through to latin1, which is wrong but
+ * loses nothing: every byte survives as its own code point and can still be
+ * matched, where UTF-8 replaces it outright. nexia-core does this properly with
+ * GetConsoleOutputCP, and takes over when the C build driver lands.
+ */
+const CP437_HIGH =
+    'ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒ' +
+    'áíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐' +
+    '└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀' +
+    'αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ';
+
+let _consoleCp: number | null = null;
+function consoleCodePage(): number {
+    if (_consoleCp !== null) return _consoleCp;
+    try {
+        // chcp reports the console output code page — the one the child inherits.
+        const out = require('child_process').execSync('chcp.com', { encoding: 'utf8', windowsHide: true });
+        const m = /(\d+)/.exec(out);
+        _consoleCp = m ? parseInt(m[1], 10) : 0;
+    } catch { _consoleCp = 0; }
+    return _consoleCp!;
+}
+
+export function decodeToolOutput(data: Buffer): string {
+    if (consoleCodePage() !== 437) return data.toString('latin1');
+    let s = '';
+    for (const b of data) s += b < 0x80 ? String.fromCharCode(b) : CP437_HIGH[b - 0x80];
+    return s;
+}
+
+/**
  * The libraries/defines/paths that apply to the configuration being built.
  *
  * Visual Studio keeps these per configuration, because the Xbox 360 SDK ships a
@@ -1370,12 +1415,23 @@ export class BuildSystem {
                 }
             };
 
+            /*
+             * decodeToolOutput, not data.toString().
+             *
+             * Buffer.toString() decodes as UTF-8. The SDK's tools are MSVC 2010
+             * and write to a pipe in the console's code page — 437 or 1252 on an
+             * English install, something else elsewhere — so any diagnostic
+             * quoting a non-ASCII identifier or path came through mangled, and
+             * the file name in it could no longer be matched to a file on disk.
+             * Anything ASCII was unaffected, which is why this survived: it only
+             * breaks for the users least able to report it.
+             */
             proc.stdout?.on('data', (data) => {
-                data.toString().split('\n').forEach((l: string) => { if (l.trim()) parseLine(l.trim()); });
+                decodeToolOutput(data).split('\n').forEach((l: string) => { if (l.trim()) parseLine(l.trim()); });
             });
 
             proc.stderr?.on('data', (data) => {
-                data.toString().split('\n').forEach((l: string) => { if (l.trim()) parseLine(l.trim()); });
+                decodeToolOutput(data).split('\n').forEach((l: string) => { if (l.trim()) parseLine(l.trim()); });
             });
 
             proc.on('close', (code) => {

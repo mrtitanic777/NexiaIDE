@@ -98,6 +98,7 @@ int nx_cmd_project(int argc, wchar_t **argv);
 int nx_cmd_emulator(int argc, wchar_t **argv);
 int nx_cmd_extensions(int argc, wchar_t **argv);
 int nx_cmd_build(int argc, wchar_t **argv);
+int nx_cmd_devkit(int argc, wchar_t **argv);
 
 
 /* ── util.c ── */

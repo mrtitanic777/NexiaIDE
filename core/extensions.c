@@ -315,6 +315,13 @@ int nx_cmd_extensions(int argc, wchar_t **argv)
         wchar_t id[NX_PATH];
         slug(name, id, NX_PATH);
 
+        /* A name with nothing alphanumeric in it slugs to "", and joining ""
+         * onto the extensions directory yields the directory itself — which is
+         * where manifest.json and README.md then landed, to be overwritten by
+         * the next template. Both sides refuse now; the TypeScript throws with
+         * the same reason. */
+        if (!*id) { nx_json_error("that name has no letters or numbers in it, so there is no id to install under"); return 1; }
+
         wchar_t dir[NX_PATH];
         nx_join(dir, NX_PATH, ext_dir, id);
         if (!mkdirp(dir)) { nx_json_error("extensions template: could not create the extension directory"); return 1; }

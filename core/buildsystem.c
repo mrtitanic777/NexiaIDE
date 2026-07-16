@@ -1107,13 +1107,26 @@ static int cmd_parse(int argc, wchar_t **argv)
     fclose(f);
     buf[got] = 0;
 
-    /* The tools speak the console's code page, not UTF-8. CP_ACP is what
-     * node's default decoding of a piped stdout amounts to on this machine, and
-     * a diagnostic quoting a non-ASCII identifier is the only case where the
-     * two disagree. */
-    int wn = MultiByteToWideChar(CP_ACP, 0, buf, (int)got, NULL, 0);
+    /*
+     * The console's output code page, not CP_ACP and not UTF-8.
+     *
+     * Measured rather than assumed: compiling a file named "café.cpp" makes
+     * cl.exe echo the name, and the byte it emits for é is 0x82. That is cp437
+     * — the OEM console page. CP_ACP (1252) would have sent 0xe9 and UTF-8 two
+     * bytes, so both of the obvious answers were wrong, and both were wrong
+     * only for the users least able to report it: everything ASCII decodes the
+     * same under all three.
+     *
+     * GetConsoleOutputCP rather than a hardcoded 437, because it is 850 in
+     * Western Europe and 932 in Japan. It returns 0 when no console is
+     * attached, which is exactly our case when the IDE spawns us, so fall back
+     * to CP_OEMCP — the same page the console would have used.
+     */
+    UINT cp = GetConsoleOutputCP();
+    if (!cp) cp = CP_OEMCP;
+    int wn = MultiByteToWideChar(cp, 0, buf, (int)got, NULL, 0);
     wchar_t *w = (wchar_t *)bz((size_t)(wn + 1) * sizeof(wchar_t));
-    MultiByteToWideChar(CP_ACP, 0, buf, (int)got, w, wn);
+    MultiByteToWideChar(cp, 0, buf, (int)got, w, wn);
     w[wn] = 0;
 
     /* Heap, not stack. A diag is ~6 KB (two fixed path/message buffers), so
