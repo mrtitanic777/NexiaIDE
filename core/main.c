@@ -119,6 +119,7 @@ int wmain(int argc, wchar_t **argv)
     if (!wcscmp(argv[1], L"version")) { printf("{\"ok\":true,\"version\":\"0.1.0\"}\n"); return 0; }
     if (!wcscmp(argv[1], L"sdk"))     return cmd_sdk(argc - 2, argv + 2);
     if (!wcscmp(argv[1], L"tool"))    return nx_cmd_tool(argc - 2, argv + 2);
+    if (!wcscmp(argv[1], L"xex"))     return nx_cmd_xex(argc - 2, argv + 2);
 
     nx_json_error("unknown command");
     return 2;

@@ -88,6 +88,9 @@ int nx_run(const wchar_t *exe, const wchar_t *args, const wchar_t *cwd,
            const nx_sdk *sdk, char **out);
 int nx_cmd_tool(int argc, wchar_t **argv);
 
+/* ── xex.c ── */
+int nx_cmd_xex(int argc, wchar_t **argv);
+
 /* ── util.c ── */
 int  nx_exists(const wchar_t *path);
 int  nx_is_dir(const wchar_t *path);
