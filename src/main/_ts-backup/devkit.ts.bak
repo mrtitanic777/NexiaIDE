@@ -4,7 +4,6 @@
  * Communicates via XBDM (Xbox Debug Monitor) on port 730.
  */
 
-import { execFileSync } from 'child_process';
 import * as path from 'path';
 import * as net from 'net';
 import { spawn } from 'child_process';
@@ -14,28 +13,6 @@ import { DevkitConfig, DevkitStatus } from '../shared/types';
 const XBDM_PORT = 730;
 const XBDM_TIMEOUT = 5000;
 
-
-/**
- * nexia-core.exe — the XBDM client.
- *
- * These four talked to the console over a socket from this process. The other
- * devkit operations shell out to the SDK's own xbcp, xbrun and xbreboot and
- * still do: their copy semantics are Microsoft's and only observable against
- * real hardware, so reimplementing them would be a guess that corrupts a XEX on
- * someone else's console.
- *
- * A spawn is slower than the in-process socket it replaces. It does not matter:
- * every one of these is a button press, and the console's round trip dwarfs the
- * process start.
- */
-function corePath(): string {
-    return path.join(__dirname, '..', 'nexia-core.exe');
-}
-
-function core(args: string[]): any {
-    const out = execFileSync(corePath(), args, { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
-    return JSON.parse(out);
-}
 export class DevkitManager {
     private toolchain: Toolchain;
     private consoles: DevkitConfig[] = [];
@@ -85,24 +62,86 @@ export class DevkitManager {
      */
     async connect(ip: string): Promise<DevkitStatus> {
         this.emit(`\nConnecting to ${ip}:${XBDM_PORT}...\n`);
-        let res: any;
-        try {
-            res = core(['devkit', 'connect', ip]);
-        } catch (err: any) {
-            this.connectedIp = null;
-            this.emit(`✗ Connection failed: ${err.message}\n`);
-            return { connected: false, type: err.message };
-        }
-        if (res.connected) {
-            this.connectedIp = ip;
-            this.addConsole({ name: `Xbox360@${ip}`, ip, isDefault: true });
-            this.emit(`✓ Connected to ${ip}\n`);
-            if (res.type) this.emit(`  Console type: ${res.type}\n`);
-        } else {
-            this.connectedIp = null;
-            this.emit(`✗ Connection failed: ${res.type || 'Unknown error'}\n`);
-        }
-        return { connected: !!res.connected, type: res.type };
+
+        return new Promise((resolve) => {
+            const socket = new net.Socket();
+            let responseData = '';
+            let resolved = false;
+
+            const finish = (status: DevkitStatus) => {
+                if (resolved) return;
+                resolved = true;
+                socket.destroy();
+                if (status.connected) {
+                    this.connectedIp = ip;
+                    // Register as default console
+                    this.addConsole({ name: `Xbox360@${ip}`, ip, isDefault: true });
+                    this.emit(`✓ Connected to ${ip}\n`);
+                    if (status.type) this.emit(`  Console type: ${status.type}\n`);
+                } else {
+                    this.connectedIp = null;
+                    this.emit(`✗ Connection failed: ${status.type || 'Unknown error'}\n`);
+                }
+                resolve(status);
+            };
+
+            socket.setTimeout(XBDM_TIMEOUT);
+
+            socket.on('connect', () => {
+                // XBDM sends a banner on connect, then we can send commands
+                // Wait for the initial banner response
+            });
+
+            socket.on('data', (data) => {
+                responseData += data.toString();
+
+                // XBDM banner is typically "201- connected\r\n"
+                if (responseData.includes('201') || responseData.includes('connected')) {
+                    // Connected! Try to get console info
+                    socket.write('dbgname\r\n');
+
+                    // Check if we already have the name response
+                    const lines = responseData.split('\r\n');
+                    for (const line of lines) {
+                        if (line.startsWith('200-')) {
+                            const consoleName = line.substring(4).trim();
+                            finish({
+                                connected: true,
+                                type: consoleName || 'Xbox 360 Development Kit',
+                            });
+                            return;
+                        }
+                    }
+
+                    // Wait a bit more for the name response
+                    setTimeout(() => {
+                        if (!resolved) {
+                            // Parse whatever we got
+                            const nameMatch = responseData.match(/200-\s*(.+)/);
+                            finish({
+                                connected: true,
+                                type: nameMatch ? nameMatch[1].trim() : 'Xbox 360 Development Kit',
+                            });
+                        }
+                    }, 1500);
+                }
+            });
+
+            socket.on('timeout', () => {
+                finish({ connected: false, type: `Timeout - no response from ${ip}:${XBDM_PORT}` });
+            });
+
+            socket.on('error', (err: any) => {
+                let reason = err.message;
+                if (err.code === 'ECONNREFUSED') reason = `Connection refused - XBDM not running on ${ip}`;
+                else if (err.code === 'EHOSTUNREACH') reason = `Host unreachable - check network cable and IP`;
+                else if (err.code === 'ENETUNREACH') reason = `Network unreachable - check ethernet connection`;
+                else if (err.code === 'ETIMEDOUT') reason = `Timed out - console may be off or wrong IP`;
+                finish({ connected: false, type: reason });
+            });
+
+            socket.connect(XBDM_PORT, ip);
+        });
     }
 
     /**
@@ -118,26 +157,117 @@ export class DevkitManager {
      * List available volumes/drives on the console via XBDM drivelist command.
      */
     async listVolumes(ip?: string): Promise<string[]> {
-        const target = ip || this.connectedIp;
-        if (!target) return [];
-        try {
-            return core(['devkit', 'volumes', target]).volumes || [];
-        } catch {
-            return [];
-        }
+        const targetIp = ip || this.connectedIp || this.getDefault()?.ip;
+        if (!targetIp) throw new Error('No console connected');
+
+        return new Promise((resolve, reject) => {
+            const socket = new net.Socket();
+            let responseData = '';
+            let sentCommand = false;
+            let resolved = false;
+
+            const finish = () => {
+                if (resolved) return;
+                resolved = true;
+                socket.destroy();
+                // Parse drivelist response
+                // Format: 202- multiline follows\r\ndrivename="HDD"\r\ndrivename="GAME"\r\n...\r\n.\r\n
+                const drives: string[] = [];
+                const lines = responseData.split('\r\n');
+                for (const line of lines) {
+                    const match = line.match(/drivename="([^"]+)"/i);
+                    if (match) drives.push(match[1] + ':');
+                }
+                resolve(drives.length > 0 ? drives : ['HDD:', 'GAME:', 'DVD:']);
+            };
+
+            socket.setTimeout(XBDM_TIMEOUT);
+
+            socket.on('data', (data) => {
+                responseData += data.toString();
+
+                if (!sentCommand && responseData.includes('201')) {
+                    sentCommand = true;
+                    socket.write('drivelist\r\n');
+                }
+
+                // Check for end of multiline response
+                if (sentCommand && responseData.includes('\r\n.\r\n')) {
+                    finish();
+                }
+            });
+
+            // Fallback timeout in case end marker is not received
+            socket.on('timeout', () => {
+                if (sentCommand && !resolved) {
+                    finish();
+                } else {
+                    socket.destroy();
+                    reject(new Error('Timeout'));
+                }
+            });
+            socket.on('error', (err) => { socket.destroy(); reject(err); });
+            socket.connect(XBDM_PORT, targetIp);
+        });
     }
 
     /**
      * Get console system info via XBDM.
      */
     async getSystemInfo(ip?: string): Promise<Record<string, string>> {
-        const target = ip || this.connectedIp;
-        if (!target) return {};
-        try {
-            return core(['devkit', 'sysinfo', target]).info || {};
-        } catch {
-            return {};
-        }
+        const targetIp = ip || this.connectedIp || this.getDefault()?.ip;
+        if (!targetIp) throw new Error('No console connected');
+
+        return new Promise((resolve, reject) => {
+            const socket = new net.Socket();
+            let responseData = '';
+            let sentCommand = false;
+            let resolved = false;
+            const info: Record<string, string> = {};
+
+            const finish = () => {
+                if (resolved) return;
+                resolved = true;
+                // Parse multiline response
+                const lines = responseData.split('\r\n');
+                for (const line of lines) {
+                    if (line.includes('=')) {
+                        const [key, ...val] = line.replace(/^202\| /, '').split('=');
+                        if (key && val.length) info[key.trim()] = val.join('=').trim();
+                    }
+                }
+                socket.destroy();
+                resolve(info);
+            };
+
+            socket.setTimeout(XBDM_TIMEOUT);
+
+            socket.on('data', (data) => {
+                responseData += data.toString();
+
+                if (!sentCommand && responseData.includes('201')) {
+                    sentCommand = true;
+                    socket.write('systeminfo\r\n');
+                }
+
+                // Check for end of multiline response
+                if (sentCommand && responseData.includes('\r\n.\r\n')) {
+                    finish();
+                }
+            });
+
+            // Fallback timeout in case end marker is not received
+            socket.on('timeout', () => {
+                if (sentCommand && !resolved) {
+                    finish();
+                } else {
+                    socket.destroy();
+                    reject(new Error('Timeout'));
+                }
+            });
+            socket.on('error', (err) => { socket.destroy(); reject(err); });
+            socket.connect(XBDM_PORT, targetIp);
+        });
     }
 
     /**
@@ -301,14 +431,75 @@ export class DevkitManager {
      * List files on the devkit via XBDM dirlist command.
      */
     async listFiles(remotePath: string, ip?: string): Promise<string> {
-        const target = ip || this.connectedIp;
-        if (!target) return '';
-        try {
-            const res = core(['devkit', 'ls', target, remotePath]);
-            return Array.isArray(res.files) ? res.files.join('\n') : (res.raw || '');
-        } catch (err: any) {
-            return `Error: ${err.message}`;
-        }
+        const targetIp = ip || this.connectedIp || this.getDefault()?.ip;
+        if (!targetIp) throw new Error('No console connected');
+
+        return new Promise((resolve, reject) => {
+            const socket = new net.Socket();
+            let responseData = '';
+            let sentCommand = false;
+
+            socket.setTimeout(XBDM_TIMEOUT + 5000); // Extra time for large dirs
+
+            socket.on('data', (data) => {
+                responseData += data.toString();
+
+                if (!sentCommand && responseData.includes('201')) {
+                    sentCommand = true;
+                    // Normalize path
+                    const cleanPath = remotePath.replace(/\//g, '\\');
+                    socket.write(`dirlist name="${cleanPath}"\r\n`);
+                }
+
+                // Check for end of multiline response
+                if (sentCommand && responseData.includes('\r\n.\r\n')) {
+                    socket.destroy();
+
+                    // Parse dirlist response
+                    // Format: name="filename" sizehi=0x0 sizelo=0x1234 create=... modify=... \r\n
+                    // Directories have no size fields or sizehi=0 sizelo=0
+                    const lines = responseData.split('\r\n');
+                    const results: string[] = [];
+
+                    for (const line of lines) {
+                        const nameMatch = line.match(/name="([^"]+)"/);
+                        if (!nameMatch) continue;
+
+                        const name = nameMatch[1];
+                        const sizeHiMatch = line.match(/sizehi=0x([0-9a-fA-F]+)/);
+                        const sizeLoMatch = line.match(/sizelo=0x([0-9a-fA-F]+)/);
+                        // Directories have directory attribute or size of 0
+                        const hasDir = line.includes('directory') || line.includes('DIR');
+                        const sizeHi = sizeHiMatch ? parseInt(sizeHiMatch[1], 16) : 0;
+                        const sizeLo = sizeLoMatch ? parseInt(sizeLoMatch[1], 16) : 0;
+                        const totalSize = (sizeHi * 0x100000000) + sizeLo;
+                        const isDir = hasDir || (totalSize === 0 && !sizeLoMatch);
+
+                        if (isDir) {
+                            results.push(`<DIR>          ${name}`);
+                        } else {
+                            const sizeStr = totalSize.toLocaleString();
+                            results.push(`${sizeStr}  ${name}`);
+                        }
+                    }
+
+                    resolve(results.join('\n'));
+                }
+            });
+
+            socket.on('timeout', () => {
+                socket.destroy();
+                // Return whatever we got
+                if (sentCommand && responseData) {
+                    resolve(responseData);
+                } else {
+                    reject(new Error('Timeout listing directory'));
+                }
+            });
+
+            socket.on('error', (err) => { socket.destroy(); reject(err); });
+            socket.connect(XBDM_PORT, targetIp);
+        });
     }
 
     /**
