@@ -3,76 +3,69 @@
 What of the C is wired into the IDE, and what is not. Kept honest: every claim
 here is something that was run, not something that was reasoned about.
 
-## Where this is going
+## Where this landed
 
-Every command listed below is wired. The port is not finished, because the goal
-is not "the ported parts are called" — it is **`src/main` in C, with `main.ts`
-left as the bridge to the UI and nothing else behind it**.
+The rule this port settled on is *TypeScript orchestrates and spawns; C
+computes.* Applied consistently, it has a natural finish line, and we are at it:
+**every piece of compute logic in `src/main` is in C and wired.** What remains in
+TypeScript is orchestration and the Electron shell, which the rule says stay in
+the orchestrator — not in the spawned tool.
 
-The UI is explicitly out of scope and is its own project: 25,167 lines of
-TypeScript, 3,727 of CSS and 1,170 of HTML cannot leave while Electron draws the
-window, and Monaco is a browser application that gets replaced (Scintilla), not
-ported. Nothing below touches it.
+### Done — the compute, in C and wired
 
-C or C++ both fine — same toolchain, no new runtime. **Not C#**: it drags in
-.NET, which is the same class of dependency Electron is being dropped to escape,
-and it is painful on Windows 7.
+- `toolchain` — SDK detect/state/tool/runtime, tool env
+- `xex` — the header parser
+- `projectManager` — the tree, templates, create/open/save (save stays
+  `JSON.stringify`: `jv_write` is byte-identical, so routing a live object
+  through the C would serialise twice for the same bytes)
+- `vsImporter` — `.sln`, `.vcxproj`, `.vcproj`, project-reference resolution
+- `buildSystem` — the compiler/linker **argv** (`build args`) and the output
+  **parser** (`build parse`)
+- `emulator` — process discovery, break-in, gdb-locate, configured-check
+- `extensions` — list/install/template/uninstall/dir
+- `devkit` — the XBDM client
+- `search` — YouTube/Brave/Google, over `core/http.c` (WinHTTP, TLS 1.2 forced)
 
-### What is left, in order
+### Not ported — and why they stay in the orchestrator
 
-**1. `projectManager.ts` — 1,486 lines, but only ~568 of logic.**
-918 lines are embedded C++ template text (`XBOX_APP_MAIN` 354, `HELLO_MAIN` 296,
-`XUI_MAIN` 131, `XBLA_MAIN` 72, `STDAFX_H` 25). `getFileTree` is already
-`core/project.c`. What moves:
-  - `project templates` — the blobs and their metadata. **Generate the C from the
-    TypeScript with a script; do not retype it.** Hand-escaping 918 lines of C++
-    into C string literals is precisely where a silent typo ends up in somebody's
-    new project, and it would not fail the build — it would compile something
-    subtly wrong.
-  - `project create` — token substitution (`__PROJECT__`, `__PROJECT_UPPER__`,
-    `__PROJECT_SAFE__`), directories, the `sdkFiles` copy out of the user's own
-    XDK, and writing `nexia.json`.
-  - `project open` / `project save` — ~35 lines together.
-  - Proven by: a parity test against `_ts-backup/projectManager.ts.bak`, which
-    already exists, plus creating a real project and building it. Not fixtures.
+These are not unfinished. They are orchestration or shell, which the governing
+rule keeps out of nexia-core-the-spawned-tool. Under the "no TypeScript" end
+goal they are rewritten in the **native UI app**, alongside the renderer — not
+added to nexia-core as more one-shot commands.
 
-**2. `vsImporter.ts` — 836 lines.** Needs an XML reader in C. `json_parse.c` is
-334 lines and is the shape to copy. `.vcxproj`/`.vcproj` need a subset, not a
-conformant parser.
+- **`buildSystem.ts` build loop (~600 lines).** It loops over sources, spawns
+  `cl.exe`, streams the Output panel, links, runs ImageXex/XuiPackage, and builds
+  project references first. That *is* orchestration and spawning. Moving it into
+  nexia-core would invert the rule the port is built on and re-open "the C never
+  spawns a compiler" (the guard behind `build args` refusing `projectReferences`).
+  C already computes the argv and parses the output; the loop around them is the
+  orchestrator's.
+- **`emulator.ts` GDB/MI session (~400 lines).** A resident, stateful wrapper
+  over a live gdb process — token counter, pending-callbacks map, breakpoints —
+  where every step/breakpoint/read hits the same held-open child. A one-shot C
+  command cannot hold it; it would need nexia-core to become a daemon, for logic
+  that is a counter and a map. Near-zero value, high cost.
+- **`discord.ts` (836).** A local OAuth callback server on 127.0.0.1, token
+  exchange and an object holding the access token across calls. Desktop
+  integration orchestration, with no clean compute to extract.
+- **`main.ts` (1,505).** `BrowserWindow` and the `ipcMain` handlers. The Electron
+  shell. It does not port; it evaporates when Electron does.
 
-**3. `discord.ts` (836) + `searchService.ts` (280).** Needs HTTPS. Use
-**WinHTTP**, not raw schannel — it does TLS and ships on Windows 7. One trap:
-WinHTTP defaults to TLS 1.0 there and Discord requires 1.2, so
-`WINHTTP_OPTION_SECURE_PROTOCOLS` must be set explicitly. This is the first
-dependency in this port that is not simply "more C".
+### The shims
 
-**4. `buildSystem.ts` (1,166) + `emulator.ts` (606). Read this before starting
-either.** These are not ports. They change what nexia-core *is*.
+`toolchain.ts` (628 → shim), `devkit.ts` (548), `extensions.ts` (288),
+`sdkTools.ts` (177) are already thin fronts over the C. They collapse further
+only when `main.ts` calls nexia-core directly — which is part of dropping
+Electron, not a nexia-core task.
 
-nexia-core is strictly one-shot: `main.c` dispatches, prints one JSON object,
-exits; `run.c` drains a pipe to EOF, waits, then prints once at the end.
-  - The Output panel shows compiler lines *as they happen*. A C-owned build loop
-    on the current shape would show nothing for thirty seconds and then
-    everything. It requires **streaming** — newline-delimited events read
-    incrementally — and a long-lived process.
-  - The GDB/MI session is stateful across many calls (token counter, pending
-    callbacks, a live child held open). One-shot cannot hold it. nexia-core would
-    have to become **resident**.
-  - And moving the build loop reverses **"the C never spawns a compiler"**. That
-    rule is why `build args` refuses `projectReferences`. Once C owns the loop
-    that refusal stops being a guard and becomes a bug.
+### The end goal beyond this
 
-So step 4 breaks the rule that made this port clean — *TypeScript orchestrates
-and spawns, C computes* — because there would be nothing left to orchestrate.
-That is unavoidable at the destination, but it should be one deliberate decision
-made after 1–3, not something discovered halfway through a build-loop port.
-
-**5. `toolchain.ts` (628), `devkit.ts` (548), `extensions.ts` (288),
-`sdkTools.ts` (177).** 1,641 lines that are already mostly shims over the C.
-These collapse rather than port, once `main.ts` calls nexia-core directly.
-
-`main.ts` (1,505) does not port. It is `BrowserWindow` and 105 `ipcMain`
-handlers; it evaporates when Electron does, and not before.
+"No Electron, no TypeScript" needs the orchestration layer and the ~30k-line UI
+(renderer + CSS + HTML, Monaco replaced by Scintilla) rewritten as a native
+C/C++ app. That is a separate, ground-up project. The build loop and the gdb
+session move *there*, into native orchestration code — not into nexia-core. C or
+C++ both fine; **not C#** (drags in .NET, the same class of dependency Electron
+is being dropped to escape, and painful on Windows 7).
 
 ## Wired in
 
