@@ -175,6 +175,180 @@ const char *vs_map_configuration_type(const wchar_t *v)
     return "executable";
 }
 
+/* ── files and paths ──────────────────────────────────────────────────────── */
+
+/*
+ * Read a whole file as a wide string, decoding UTF-8.
+ *
+ * These files are read with fs.readFileSync(p, 'utf-8') in the TypeScript, so
+ * UTF-8 is what they are. Returns a malloc'd buffer the caller frees, or NULL
+ * if the file will not open.
+ */
+static wchar_t *read_utf8(const wchar_t *path)
+{
+    FILE *f = _wfopen(path, L"rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n < 0) { fclose(f); return NULL; }
+
+    char *bytes = (char *)malloc((size_t)n + 1);
+    if (!bytes) { fclose(f); return NULL; }
+    size_t got = fread(bytes, 1, (size_t)n, f);
+    fclose(f);
+    bytes[got] = 0;
+
+    /* A UTF-8 BOM would otherwise become U+FEFF at the front of the document and
+     * throw off a match anchored at the start. */
+    const char *start = bytes;
+    if (got >= 3 && (unsigned char)bytes[0] == 0xEF &&
+        (unsigned char)bytes[1] == 0xBB && (unsigned char)bytes[2] == 0xBF)
+        start = bytes + 3;
+
+    int wn = MultiByteToWideChar(CP_UTF8, 0, start, -1, NULL, 0);
+    wchar_t *w = (wchar_t *)malloc((size_t)wn * sizeof(wchar_t));
+    if (w) MultiByteToWideChar(CP_UTF8, 0, start, -1, w, wn);
+    free(bytes);
+    return w;
+}
+
+/* toHostPath: unescape %XX, turn every / and \ into a backslash, trim. */
+static void to_host_path(wchar_t *s)
+{
+    vs_unescape_msbuild(s);
+    for (wchar_t *p = s; *p; p++)
+        if (*p == L'/' || *p == L'\\') *p = L'\\';
+    trim(s);
+}
+
+/* path.basename(p, ext) with the extension stripped — the file's stem. */
+static void base_stem(const wchar_t *p, wchar_t *out, size_t cap)
+{
+    const wchar_t *b = p;
+    for (const wchar_t *q = p; *q; q++)
+        if (*q == L'\\' || *q == L'/') b = q + 1;
+    nx_copy(out, cap, b);
+    wchar_t *dot = wcsrchr(out, L'.');
+    if (dot && dot != out) *dot = 0;
+}
+
+/*
+ * path.resolve(dir, rel): rel if it is already absolute, else dir\rel, and in
+ * either case run through GetFullPathName so '.' and '..' collapse. Node
+ * resolves against dir; GetFullPathName resolves against the process CWD, so the
+ * join has to happen first.
+ */
+static void resolve_against(const wchar_t *dir, const wchar_t *rel, wchar_t *out, size_t cap)
+{
+    wchar_t joined[NX_PATH];
+    int abs = (rel[0] && rel[1] == L':') || (rel[0] == L'\\' && rel[1] == L'\\');
+    if (abs) nx_copy(joined, NX_PATH, rel);
+    else     nx_join(joined, NX_PATH, dir, rel);
+    if (!GetFullPathNameW(joined, (DWORD)cap, out, NULL)) nx_copy(out, cap, joined);
+}
+
+/* case-insensitive suffix test, ASCII — for ".vcxproj"/".vcproj". */
+static int iends(const wchar_t *s, const wchar_t *suf)
+{
+    size_t ls = wcslen(s), lf = wcslen(suf);
+    if (lf > ls) return 0;
+    const wchar_t *t = s + (ls - lf);
+    for (size_t i = 0; i < lf; i++) {
+        wchar_t a = t[i], b = suf[i];
+        if (a >= L'A' && a <= L'Z') a += 32;
+        if (b >= L'A' && b <= L'Z') b += 32;
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+/*
+ * parseSolution.
+ *
+ * A .sln is plain text, one project per line:
+ *   Project("{GUID}") = "Name", "relative\path.vcxproj", "{GUID}"
+ * matched by /^Project\("\{[^}]+\}"\)\s*=\s*"([^"]+)",\s*"([^"]+)"/gm — anchored
+ * at line start, so this scans line by line and pulls the first two quoted
+ * fields. Solution folders and C#/other projects are skipped by the extension,
+ * exactly as the .test(rel) guard does.
+ */
+static int parse_solution(const wchar_t *slnPath)
+{
+    wchar_t *raw = read_utf8(slnPath);
+    if (!raw) { nx_json_error("vsimport solution: cannot read the .sln"); return 1; }
+
+    wchar_t dir[NX_PATH];
+    nx_copy(dir, NX_PATH, slnPath);
+    wchar_t *slash = wcsrchr(dir, L'\\');
+    if (!slash) slash = wcsrchr(dir, L'/');
+    if (slash) *slash = 0; else nx_copy(dir, NX_PATH, L".");
+
+    wchar_t name[NX_PATH];
+    base_stem(slnPath, name, NX_PATH);
+
+    printf("{\"ok\":true,");
+    nx_json_field(stdout, "solutionPath", slnPath); printf(",");
+    nx_json_field(stdout, "name", name);
+    printf(",\"projects\":[");
+
+    int first = 1;
+    for (wchar_t *line = raw; *line; ) {
+        wchar_t *eol = line;
+        while (*eol && *eol != L'\n' && *eol != L'\r') eol++;
+        wchar_t saved = *eol; *eol = 0;
+
+        /* ^Project("{...}") = "..." , "..." */
+        const wchar_t *p = line;
+        while (*p == L' ' || *p == L'\t') p++;
+        if (!wcsncmp(p, L"Project(\"{", 10)) {   /* Project("{ */
+            /* the two quoted fields after the ) = */
+            const wchar_t *q = wcschr(p, L')');
+            if (q) {
+                q = wcschr(q, L'=');
+                if (q) {
+                    /* first quoted string: name */
+                    const wchar_t *n1 = wcschr(q, L'"');
+                    const wchar_t *n2 = n1 ? wcschr(n1 + 1, L'"') : NULL;
+                    /* comma, then second quoted string: rel path */
+                    const wchar_t *c = n2 ? wcschr(n2 + 1, L',') : NULL;
+                    const wchar_t *r1 = c ? wcschr(c, L'"') : NULL;
+                    const wchar_t *r2 = r1 ? wcschr(r1 + 1, L'"') : NULL;
+                    if (n1 && n2 && r1 && r2) {
+                        wchar_t pname[NX_PATH], rel[NX_PATH];
+                        size_t nl = (size_t)(n2 - n1 - 1), rl = (size_t)(r2 - r1 - 1);
+                        if (nl < NX_PATH && rl < NX_PATH) {
+                            wcsncpy(pname, n1 + 1, nl); pname[nl] = 0; trim(pname);
+                            wcsncpy(rel, r1 + 1, rl);   rel[rl] = 0;   trim(rel);
+
+                            if (iends(rel, L".vcxproj") || iends(rel, L".vcproj")) {
+                                to_host_path(rel);
+                                wchar_t abs[NX_PATH];
+                                resolve_against(dir, rel, abs, NX_PATH);
+                                int exists = GetFileAttributesW(abs) != INVALID_FILE_ATTRIBUTES;
+
+                                if (!first) printf(",");
+                                first = 0;
+                                printf("{");
+                                nx_json_field(stdout, "name", pname); printf(",");
+                                nx_json_field(stdout, "path", abs); printf(",");
+                                printf("\"exists\":%s}", exists ? "true" : "false");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        *eol = saved;
+        line = (saved == 0) ? eol : eol + 1;
+    }
+
+    printf("]}\n");
+    free(raw);
+    return 0;
+}
+
 /* ── the CLI, for the parity test ─────────────────────────────────────────── */
 
 /*
@@ -213,6 +387,11 @@ int nx_cmd_vsimport(int argc, wchar_t **argv)
         printf("\"configurationType\":\"%s\"", ct);
         printf("}\n");
         return 0;
+    }
+
+    if (!wcscmp(argv[0], L"solution")) {
+        if (argc < 2) { nx_json_error("vsimport solution: expected <path.sln>"); return 2; }
+        return parse_solution(argv[1]);
     }
 
     nx_json_error("vsimport: unknown subcommand");
