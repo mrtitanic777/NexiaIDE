@@ -56,7 +56,7 @@ for (const src of ['core/json_parse.c', 'core/util.c']) {
 const cppObjs = [];
 const imguiSrc = [
     `${IMGUI}/imgui.cpp`, `${IMGUI}/imgui_draw.cpp`, `${IMGUI}/imgui_tables.cpp`,
-    `${IMGUI}/imgui_widgets.cpp`,
+    `${IMGUI}/imgui_widgets.cpp`, `${IMGUI}/misc/cpp/imgui_stdlib.cpp`,
     `${IMGUI}/backends/imgui_impl_win32.cpp`, `${IMGUI}/backends/imgui_impl_dx9.cpp`,
 ];
 for (const src of imguiSrc) {

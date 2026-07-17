@@ -7,6 +7,7 @@
 #include "ui.h"
 #include "core_bridge.h"
 #include "builder.h"
+#include "editor.h"
 #include "imgui.h"
 #include <string>
 
@@ -59,11 +60,11 @@ static void panelTree() {
             ImGui::TextUnformatted(("[+] " + label).c_str());
             ImGui::PopStyleColor();
         } else {
-            bool sel = (r.name == g_selected);
+            bool sel = (r.path == g_selected);
             std::string sl = " " + label + "##" + std::to_string(idx);
             if (ImGui::Selectable(sl.c_str(), sel)) {
-                g_selected = r.name;
-                g_output += "Opened " + label + "\n";
+                g_selected = r.path;
+                editor_open(r.path);
             }
         }
         if (ind > 0) ImGui::Unindent(ind);
@@ -72,15 +73,7 @@ static void panelTree() {
 }
 
 static void panelEditor() {
-    ImGui::TextColored(kAccent, "EDITOR");
-    ImGui::Separator();
-    if (g_selected.empty()) {
-        ImGui::TextDisabled("No file open. Click a file in the Solution Explorer.");
-    } else {
-        ImGui::Text("Editing: %s", u8(g_selected).c_str());
-        ImGui::Spacing();
-        ImGui::TextDisabled("A Scintilla editor lands in this pane next \xE2\x80\x94 this is its placeholder.");
-    }
+    editor_draw();
 }
 
 static void panelOutput() {

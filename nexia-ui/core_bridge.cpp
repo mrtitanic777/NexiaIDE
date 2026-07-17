@@ -78,8 +78,9 @@ static void collectTree(const jv* arr, int depth, std::vector<FileRow>& out) {
         const jv* children = jv_get(n, L"children");
         FileRow r;
         r.name  = jvStr(n, L"name");
+        r.path  = jvStr(n, L"path");
         r.depth = depth;
-        r.dir   = (jvStr(n, L"type") == L"directory") || (children != NULL);
+        r.dir   = jv_bool_or(jv_get(n, L"isDirectory"), children != NULL ? 1 : 0);
         out.push_back(r);
         if (children) collectTree(children, depth + 1, out);
     }

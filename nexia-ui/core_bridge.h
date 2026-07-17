@@ -11,7 +11,7 @@
 #include <vector>
 
 // One row of the Solution Explorer, flattened with a depth for indentation.
-struct FileRow { std::wstring name; int depth; bool dir; };
+struct FileRow { std::wstring name; std::wstring path; int depth; bool dir; };
 
 // Everything the UI shows, filled from nexia-core.
 struct AppState {
