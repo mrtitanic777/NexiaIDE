@@ -38,6 +38,20 @@
     <Compile Include="MainWindow.xaml.cs">
       <DependentUpon>MainWindow.xaml</DependentUpon>
     </Compile>
+    <Page Include="ExplorerPanel.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+    <Compile Include="ExplorerPanel.xaml.cs">
+      <DependentUpon>ExplorerPanel.xaml</DependentUpon>
+    </Compile>
+    <Page Include="StubPanel.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+    <Compile Include="StubPanel.xaml.cs">
+      <DependentUpon>StubPanel.xaml</DependentUpon>
+    </Compile>
     <Compile Include="CoreBridge.cs" />
     <Compile Include="FileNode.cs" />
     <Compile Include="Builder.cs" />

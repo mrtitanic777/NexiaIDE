@@ -1,0 +1,17 @@
+<UserControl x:Class="NexiaUI.ExplorerPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Foreground="{StaticResource Text}">
+    <DockPanel>
+        <TextBlock DockPanel.Dock="Top" Text="SOLUTION EXPLORER" FontWeight="SemiBold"
+                   FontSize="11" Margin="10,8" Foreground="{StaticResource Accent}"/>
+        <TreeView x:Name="Tree" Background="Transparent" BorderThickness="0"
+                  Foreground="{StaticResource Text}" SelectedItemChanged="OnSelect">
+            <TreeView.ItemTemplate>
+                <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                    <TextBlock Text="{Binding Name}"/>
+                </HierarchicalDataTemplate>
+            </TreeView.ItemTemplate>
+        </TreeView>
+    </DockPanel>
+</UserControl>

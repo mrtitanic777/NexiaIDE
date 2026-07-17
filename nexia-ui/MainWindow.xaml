@@ -1,25 +1,80 @@
 <Window x:Class="NexiaUI.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Nexia IDE" Height="740" Width="1100"
+        Title="Nexia IDE" Height="780" Width="1200"
         Background="{StaticResource AppBg}" Foreground="{StaticResource Text}"
         FontFamily="Segoe UI">
+    <Window.Resources>
+        <!-- an activity-rail button: a tall toggle that lights up when its panel is shown -->
+        <Style x:Key="RailButton" TargetType="RadioButton">
+            <Setter Property="GroupName" Value="rail"/>
+            <Setter Property="Foreground" Value="{StaticResource TextDim}"/>
+            <Setter Property="Height" Value="52"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="b" Background="Transparent" BorderThickness="2,0,0,0" BorderBrush="Transparent">
+                            <TextBlock Text="{TemplateBinding Content}" FontSize="10" TextAlignment="Center"
+                                       VerticalAlignment="Center" Foreground="{TemplateBinding Foreground}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                <Setter TargetName="b" Property="Background" Value="#2C2C33"/>
+                                <Setter Property="Foreground" Value="{StaticResource Text}"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Foreground" Value="{StaticResource Text}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
     <DockPanel>
-        <!-- menu -->
-        <Menu DockPanel.Dock="Top" Background="{StaticResource ChromeBg}" Foreground="{StaticResource Text}">
+        <!-- ── menu ── -->
+        <Menu DockPanel.Dock="Top" Background="{StaticResource ChromeBg}">
             <MenuItem Header="_File" Foreground="Black">
-                <MenuItem Header="Reload from nexia-core" Click="OnReload"/>
+                <MenuItem Header="New Project…" Click="OnNewProject"/>
+                <MenuItem Header="Open Project…" Click="OnOpenProject"/>
+                <MenuItem Header="Close Project" Click="OnCloseProject"/>
                 <Separator/>
                 <MenuItem Header="Save" InputGestureText="Ctrl+S" Click="OnSave"/>
                 <Separator/>
                 <MenuItem Header="Exit" Click="OnExit"/>
             </MenuItem>
+            <MenuItem Header="_Edit" Foreground="Black">
+                <MenuItem Header="Find in Files" InputGestureText="Ctrl+Shift+F" Click="OnFindInFiles"/>
+            </MenuItem>
+            <MenuItem Header="_View" Foreground="Black">
+                <MenuItem Header="Explorer" Click="OnViewExplorer"/>
+                <MenuItem Header="Output" Click="OnViewOutput"/>
+            </MenuItem>
             <MenuItem Header="_Build" Foreground="Black">
-                <MenuItem Header="Build (Debug)" InputGestureText="F7" Click="OnBuild"/>
+                <MenuItem Header="Build" InputGestureText="F7" Click="OnBuild"/>
+                <MenuItem Header="Rebuild" Click="OnBuild"/>
+                <MenuItem Header="Clean" Click="OnClean"/>
+                <Separator/>
+                <MenuItem Header="Project Properties…" Click="OnProjectProps"/>
+            </MenuItem>
+            <MenuItem Header="_Devkit" Foreground="Black">
+                <MenuItem Header="Connect / Manage…" Click="OnShowDevkit"/>
+            </MenuItem>
+            <MenuItem Header="_Emulator" Foreground="Black">
+                <MenuItem Header="Launch / Debug…" Click="OnShowEmulator"/>
+            </MenuItem>
+            <MenuItem Header="_Tools" Foreground="Black">
+                <MenuItem Header="XEX Inspector…" Click="OnXexInspector"/>
+                <MenuItem Header="Extensions…" Click="OnShowExtensions"/>
+            </MenuItem>
+            <MenuItem Header="_Help" Foreground="Black">
+                <MenuItem Header="About Nexia IDE" Click="OnAbout"/>
             </MenuItem>
         </Menu>
 
-        <!-- status bar -->
+        <!-- ── status bar ── -->
         <Border DockPanel.Dock="Bottom" Background="{StaticResource ChromeBg}" Padding="10,4">
             <StackPanel Orientation="Horizontal">
                 <TextBlock Text="SDK:" Foreground="{StaticResource TextDim}"/>
@@ -31,51 +86,55 @@
             </StackPanel>
         </Border>
 
-        <!-- content: tree | (editor / output) -->
+        <!-- ── activity rail ── -->
+        <Border DockPanel.Dock="Left" Width="46" Background="#202024">
+            <StackPanel>
+                <RadioButton x:Name="RbExplorer"   Style="{StaticResource RailButton}" Content="EXPLORE" IsChecked="True" Checked="OnRail"/>
+                <RadioButton x:Name="RbSearch"     Style="{StaticResource RailButton}" Content="SEARCH"  Checked="OnRail"/>
+                <RadioButton x:Name="RbAi"         Style="{StaticResource RailButton}" Content="AI"      Checked="OnRail"/>
+                <RadioButton x:Name="RbGit"        Style="{StaticResource RailButton}" Content="GIT"     Checked="OnRail"/>
+                <RadioButton x:Name="RbExtensions" Style="{StaticResource RailButton}" Content="EXT"     Checked="OnRail"/>
+                <RadioButton x:Name="RbDevkit"     Style="{StaticResource RailButton}" Content="DEVKIT"  Checked="OnRail"/>
+                <RadioButton x:Name="RbEmulator"   Style="{StaticResource RailButton}" Content="EMU"     Checked="OnRail"/>
+                <RadioButton x:Name="RbLearn"      Style="{StaticResource RailButton}" Content="LEARN"   Checked="OnRail"/>
+                <RadioButton x:Name="RbCommunity"  Style="{StaticResource RailButton}" Content="COMMUN"  Checked="OnRail"/>
+            </StackPanel>
+        </Border>
+
+        <!-- ── main content ── -->
         <Grid>
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="270" MinWidth="160"/>
+                <ColumnDefinition Width="280" MinWidth="180"/>
                 <ColumnDefinition Width="4"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
-            <!-- Solution Explorer -->
+            <!-- sidebar: one host, content swapped by the rail -->
             <Border Grid.Column="0" Background="{StaticResource PanelBg}">
-                <DockPanel>
-                    <TextBlock DockPanel.Dock="Top" Text="SOLUTION EXPLORER" FontWeight="SemiBold"
-                               FontSize="11" Margin="10,8" Foreground="{StaticResource Accent}"/>
-                    <TreeView x:Name="Tree" Background="Transparent" BorderThickness="0"
-                              Foreground="{StaticResource Text}"
-                              SelectedItemChanged="OnTreeSelect">
-                        <TreeView.ItemTemplate>
-                            <HierarchicalDataTemplate ItemsSource="{Binding Children}">
-                                <TextBlock Text="{Binding Name}"/>
-                            </HierarchicalDataTemplate>
-                        </TreeView.ItemTemplate>
-                    </TreeView>
-                </DockPanel>
+                <ContentControl x:Name="SidebarHost"/>
             </Border>
 
             <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Stretch"
                           Background="{StaticResource Divider}"/>
 
-            <!-- editor over output -->
+            <!-- editor over bottom panel -->
             <Grid Grid.Column="2">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="4"/>
-                    <RowDefinition Height="190" MinHeight="60"/>
+                    <RowDefinition Height="210" MinHeight="80"/>
                 </Grid.RowDefinitions>
 
+                <!-- editor: a tab strip + the text -->
                 <Border Grid.Row="0" Background="{StaticResource DeepBg}">
                     <DockPanel>
-                        <TextBlock x:Name="EditorHeader" DockPanel.Dock="Top" Text="EDITOR"
-                                   FontWeight="SemiBold" FontSize="11" Margin="10,8"
-                                   Foreground="{StaticResource Accent}"/>
+                        <Border DockPanel.Dock="Top" Background="#1F1F24" Padding="10,5">
+                            <TextBlock x:Name="EditorHeader" Text="No file open" Foreground="{StaticResource TextDim}"/>
+                        </Border>
                         <TextBox x:Name="Editor" AcceptsReturn="True" AcceptsTab="True"
                                  FontFamily="Consolas" FontSize="13"
                                  Background="{StaticResource DeepBg}" Foreground="{StaticResource Text}"
-                                 BorderThickness="0" Padding="6,0"
+                                 BorderThickness="0" Padding="6,4"
                                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
                     </DockPanel>
                 </Border>
@@ -83,15 +142,24 @@
                 <GridSplitter Grid.Row="1" Height="4" HorizontalAlignment="Stretch"
                               Background="{StaticResource Divider}"/>
 
-                <Border Grid.Row="2" Background="#101012">
-                    <DockPanel>
-                        <TextBlock DockPanel.Dock="Top" Text="OUTPUT" FontWeight="SemiBold"
-                                   FontSize="11" Margin="10,8" Foreground="{StaticResource Accent}"/>
+                <!-- bottom panel: tabbed -->
+                <TabControl Grid.Row="2" x:Name="BottomTabs" Background="#101012" BorderThickness="0">
+                    <TabItem Header="Output">
                         <TextBox x:Name="Output" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
-                                 Background="#101012" Foreground="#CCCCCC" BorderThickness="0" Padding="6,0"
+                                 Background="#101012" Foreground="#CCCCCC" BorderThickness="0" Padding="6,4"
                                  VerticalScrollBarVisibility="Auto" TextWrapping="NoWrap"/>
-                    </DockPanel>
-                </Border>
+                    </TabItem>
+                    <TabItem Header="Problems">
+                        <TextBlock Text="No problems detected." Foreground="{StaticResource TextDim}" Margin="10"/>
+                    </TabItem>
+                    <TabItem Header="Tips">
+                        <TextBlock x:Name="TipText" TextWrapping="Wrap" Foreground="{StaticResource Text}" Margin="10"/>
+                    </TabItem>
+                    <TabItem Header="Visualizer">
+                        <TextBlock Text="Code visualizer (flow / class / memory) — coming to this pane."
+                                   Foreground="{StaticResource TextDim}" Margin="10"/>
+                    </TabItem>
+                </TabControl>
             </Grid>
         </Grid>
     </DockPanel>

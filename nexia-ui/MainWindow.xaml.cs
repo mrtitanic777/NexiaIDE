@@ -1,10 +1,13 @@
 /*
- * MainWindow.xaml.cs — the shell's behaviour.
+ * MainWindow.xaml.cs — the IDE shell.
  *
- * Loads the project through nexia-core, opens files in the editor, saves them,
- * and drives a build on a background thread so the window stays responsive.
+ * Owns the activity rail, the sidebar panels, the editor, the bottom panel and
+ * the menu. The Explorer panel is real (the file tree from nexia-core); the other
+ * rail panels are titled stubs for now, each naming what it will hold, and get
+ * fleshed out one at a time. Every backend touch goes through nexia-core.
  */
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using System.Windows;
@@ -15,56 +18,123 @@ namespace NexiaUI
 {
     public partial class MainWindow : Window
     {
-        // The real test project.
         const string kProject = @"C:\Users\mrtit\Documents\NexiaIDE\Projects\CaveGame2";
 
-        string _openPath;   // file currently in the editor, null if none
+        ExplorerPanel _explorer;
+        readonly Dictionary<string, UserControl> _panels = new Dictionary<string, UserControl>();
+        string _openPath;
         bool _building;
 
         public MainWindow()
         {
             InitializeComponent();
+            BuildPanels();
             LoadProject();
+            ShowPanel("explorer");
+            TipText.Text = "Press F7 to build. Click a file in the Solution Explorer to open it. "
+                         + "The rail on the left switches panels — each is being ported from the Electron IDE.";
         }
 
+        // ── the rail panels ──
+        void BuildPanels()
+        {
+            _explorer = new ExplorerPanel { FileOpened = OpenFile };
+            _panels["explorer"]   = _explorer;
+            _panels["search"]     = new StubPanel("SEARCH", "Project-wide find & replace, with regex. Results grouped by file.");
+            _panels["ai"]         = new StubPanel("AI TUTOR", "Multi-provider assistant (Anthropic, OpenAI, Ollama): streaming chat, code generation, inline explain / fix / refactor, and proactive tutoring.");
+            _panels["git"]        = new StubPanel("SOURCE CONTROL", "Init, stage, commit, diff, log, branch, merge, and push/pull to GitHub with token auth.");
+            _panels["extensions"] = new StubPanel("EXTENSIONS", "Install community tools, templates, snippet packs, themes and plugins from .zip files or folders.");
+            _panels["devkit"]     = new StubPanel("DEVKIT", "Connect to a dev kit over the network: deploy builds, reboot, screenshot, browse the file system, watch CPU/memory.");
+            _panels["emulator"]   = new StubPanel("EMULATOR (Nexia 360)", "Launch and debug builds: breakpoints, registers, step, read/write memory, backtraces.");
+            _panels["learn"]      = new StubPanel("LEARN", "The cinematic lesson system: 17 lessons across 8 modules, typing animations, mastery tracking, quizzes, flashcards, and cloud lessons.");
+            _panels["community"]  = new StubPanel("COMMUNITY", "The built-in Discord feed: browse threads, post questions, share downloads.");
+        }
+
+        void ShowPanel(string key)
+        {
+            UserControl p;
+            if (_panels.TryGetValue(key, out p)) SidebarHost.Content = p;
+        }
+
+        void OnRail(object sender, RoutedEventArgs e)
+        {
+            if (SidebarHost == null) return; // during init
+            var rb = sender as RadioButton;
+            if (rb == RbExplorer) ShowPanel("explorer");
+            else if (rb == RbSearch) ShowPanel("search");
+            else if (rb == RbAi) ShowPanel("ai");
+            else if (rb == RbGit) ShowPanel("git");
+            else if (rb == RbExtensions) ShowPanel("extensions");
+            else if (rb == RbDevkit) ShowPanel("devkit");
+            else if (rb == RbEmulator) ShowPanel("emulator");
+            else if (rb == RbLearn) ShowPanel("learn");
+            else if (rb == RbCommunity) ShowPanel("community");
+        }
+
+        void SelectRail(RadioButton rb) { rb.IsChecked = true; }
+
+        // ── project + editor ──
         void LoadProject()
         {
             SdkText.Text = CoreBridge.DetectSdk();
             string name, real;
             CoreBridge.OpenProject(kProject, out name, out real);
             ProjText.Text = name;
-            Tree.ItemsSource = CoreBridge.ProjectTree(kProject);
-            Append("Nexia IDE (WPF) — loaded through nexia-core.\n");
+            _explorer.Load(CoreBridge.ProjectTree(kProject));
         }
 
-        void OnTreeSelect(object sender, RoutedPropertyChangedEventArgs<object> e)
+        void OpenFile(FileNode node)
         {
-            var node = e.NewValue as FileNode;
-            if (node == null || node.IsDirectory) return;
             try
             {
                 Editor.Text = File.ReadAllText(node.Path);
                 _openPath = node.Path;
-                EditorHeader.Text = "EDITOR  —  " + node.Name;
+                EditorHeader.Text = node.Name;
             }
             catch (Exception ex) { Append("Could not open " + node.Name + ": " + ex.Message + "\n"); }
         }
 
+        // ── menu handlers ──
         void OnSave(object sender, RoutedEventArgs e)
         {
             if (_openPath == null) return;
-            try { File.WriteAllText(_openPath, Editor.Text); StatusText.Text = "saved"; }
+            try { File.WriteAllText(_openPath, Editor.Text); StatusText.Text = "saved " + Path.GetFileName(_openPath); }
             catch (Exception ex) { Append("Save failed: " + ex.Message + "\n"); }
         }
 
-        void OnReload(object sender, RoutedEventArgs e) { LoadProject(); }
-        void OnExit(object sender, RoutedEventArgs e) { Close(); }
+        void OnCloseProject(object sender, RoutedEventArgs e)
+        {
+            _explorer.Load(new List<FileNode>());
+            Editor.Text = ""; _openPath = null; EditorHeader.Text = "No file open";
+            ProjText.Text = "(none)";
+            Append("Project closed.\n");
+        }
 
+        void OnNewProject(object sender, RoutedEventArgs e) { Append("New Project dialog — coming.\n"); }
+        void OnOpenProject(object sender, RoutedEventArgs e) { Append("Open Project dialog — coming.\n"); }
+        void OnFindInFiles(object sender, RoutedEventArgs e) { SelectRail(RbSearch); }
+        void OnViewExplorer(object sender, RoutedEventArgs e) { SelectRail(RbExplorer); }
+        void OnViewOutput(object sender, RoutedEventArgs e) { BottomTabs.SelectedIndex = 0; }
+        void OnClean(object sender, RoutedEventArgs e) { Append("Clean — coming.\n"); }
+        void OnProjectProps(object sender, RoutedEventArgs e) { Append("Project Properties — coming.\n"); }
+        void OnShowDevkit(object sender, RoutedEventArgs e) { SelectRail(RbDevkit); }
+        void OnShowEmulator(object sender, RoutedEventArgs e) { SelectRail(RbEmulator); }
+        void OnShowExtensions(object sender, RoutedEventArgs e) { SelectRail(RbExtensions); }
+        void OnXexInspector(object sender, RoutedEventArgs e) { Append("XEX Inspector — coming.\n"); }
+        void OnExit(object sender, RoutedEventArgs e) { Close(); }
+        void OnAbout(object sender, RoutedEventArgs e)
+        {
+            MessageBox.Show(this, "Nexia IDE — native UI (WPF).\nStanding on nexia-core, the ported C backend.",
+                            "About Nexia IDE", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        // ── build ──
         void OnBuild(object sender, RoutedEventArgs e)
         {
             if (_building) return;
             _building = true;
             StatusText.Text = "building…";
+            BottomTabs.SelectedIndex = 0;
             Append("\n");
             Task.Run(() =>
             {
@@ -78,11 +148,7 @@ namespace NexiaUI
             });
         }
 
-        void Append(string s)
-        {
-            Output.AppendText(s);
-            Output.ScrollToEnd();
-        }
+        void Append(string s) { Output.AppendText(s); Output.ScrollToEnd(); }
 
         protected override void OnPreviewKeyDown(KeyEventArgs e)
         {
