@@ -65,10 +65,15 @@ for (const src of imguiSrc) {
     cppObjs.push(o);
 }
 
-// the UI itself
-const uiObj = path.join(OBJ, 'main.o');
-run(GXX, ['-c', ...cxxFlags, 'nexia-ui/main.cpp', '-o', uiObj], 'compile nexia-ui/main.cpp');
-cppObjs.push(uiObj);
+// the UI's own modules (core_bridge, app, ui, main, and any future panels)
+const uiSrc = fs.readdirSync(path.join(R, 'nexia-ui'))
+    .filter(f => f.endsWith('.cpp'))
+    .sort();
+for (const f of uiSrc) {
+    const o = path.join(OBJ, f.replace(/\.cpp$/, '.o'));
+    run(GXX, ['-c', ...cxxFlags, path.join('nexia-ui', f), '-o', o], `compile nexia-ui/${f}`);
+    cppObjs.push(o);
+}
 
 // link (static so it ships as one exe; console subsystem for now so --probe works)
 run(GXX, [
