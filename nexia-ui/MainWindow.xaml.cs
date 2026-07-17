@@ -40,7 +40,7 @@ namespace NexiaUI
         {
             _explorer = new ExplorerPanel { FileOpened = OpenFile };
             _panels["explorer"]   = _explorer;
-            _panels["search"]     = new StubPanel("SEARCH", "Project-wide find & replace, with regex. Results grouped by file.");
+            _panels["search"]     = new SearchPanel { ProjectPath = kProject, OpenAt = OpenFileAt };
             _panels["ai"]         = new StubPanel("AI TUTOR", "Multi-provider assistant (Anthropic, OpenAI, Ollama): streaming chat, code generation, inline explain / fix / refactor, and proactive tutoring.");
             _panels["git"]        = new StubPanel("SOURCE CONTROL", "Init, stage, commit, diff, log, branch, merge, and push/pull to GitHub with token auth.");
             _panels["extensions"] = new StubPanel("EXTENSIONS", "Install community tools, templates, snippet packs, themes and plugins from .zip files or folders.");
@@ -83,15 +83,32 @@ namespace NexiaUI
             _explorer.Load(CoreBridge.ProjectTree(kProject));
         }
 
-        void OpenFile(FileNode node)
+        void OpenFile(FileNode node) { OpenFileByPath(node.Path); }
+
+        void OpenFileByPath(string path)
         {
             try
             {
-                Editor.Text = File.ReadAllText(node.Path);
-                _openPath = node.Path;
-                EditorHeader.Text = node.Name;
+                Editor.Text = File.ReadAllText(path);
+                _openPath = path;
+                EditorHeader.Text = Path.GetFileName(path);
             }
-            catch (Exception ex) { Append("Could not open " + node.Name + ": " + ex.Message + "\n"); }
+            catch (Exception ex) { Append("Could not open " + Path.GetFileName(path) + ": " + ex.Message + "\n"); }
+        }
+
+        // Open a file and jump the editor to a 1-based line (from a search hit).
+        void OpenFileAt(string path, int line)
+        {
+            OpenFileByPath(path);
+            int idx = line - 1;
+            if (idx >= 0 && idx < Editor.LineCount)
+            {
+                int start = Editor.GetCharacterIndexFromLineIndex(idx);
+                int len = Editor.GetLineLength(idx);
+                Editor.Select(start, Math.Max(0, len));
+                Editor.ScrollToLine(idx);
+                Editor.Focus();
+            }
         }
 
         // ── menu handlers ──

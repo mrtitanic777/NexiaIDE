@@ -52,6 +52,13 @@
     <Compile Include="StubPanel.xaml.cs">
       <DependentUpon>StubPanel.xaml</DependentUpon>
     </Compile>
+    <Page Include="SearchPanel.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+    <Compile Include="SearchPanel.xaml.cs">
+      <DependentUpon>SearchPanel.xaml</DependentUpon>
+    </Compile>
     <Compile Include="CoreBridge.cs" />
     <Compile Include="FileNode.cs" />
     <Compile Include="Builder.cs" />
