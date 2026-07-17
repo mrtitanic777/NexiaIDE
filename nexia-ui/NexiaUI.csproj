@@ -59,6 +59,14 @@
     <Compile Include="SearchPanel.xaml.cs">
       <DependentUpon>SearchPanel.xaml</DependentUpon>
     </Compile>
+    <Page Include="GitPanel.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+    <Compile Include="GitPanel.xaml.cs">
+      <DependentUpon>GitPanel.xaml</DependentUpon>
+    </Compile>
+    <Compile Include="GitService.cs" />
     <Compile Include="CoreBridge.cs" />
     <Compile Include="FileNode.cs" />
     <Compile Include="Builder.cs" />

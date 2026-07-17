@@ -1,0 +1,54 @@
+<UserControl x:Class="NexiaUI.GitPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Foreground="{StaticResource Text}">
+    <DockPanel>
+        <DockPanel DockPanel.Dock="Top" Margin="10,8">
+            <TextBlock Text="SOURCE CONTROL" FontWeight="SemiBold" FontSize="11" Foreground="{StaticResource Accent}"/>
+            <TextBlock x:Name="BranchText" Margin="10,0,0,0" Foreground="{StaticResource TextDim}" FontSize="11"/>
+            <Button Content="Refresh" DockPanel.Dock="Right" HorizontalAlignment="Right" Width="60"
+                    Click="OnRefresh" Background="{StaticResource ChromeBg}" Foreground="{StaticResource Text}"/>
+        </DockPanel>
+
+        <!-- shown when the project is not a git repo -->
+        <StackPanel x:Name="NoRepo" DockPanel.Dock="Top" Margin="12,4" Visibility="Collapsed">
+            <TextBlock Text="This project is not a git repository." TextWrapping="Wrap"
+                       Foreground="{StaticResource TextDim}" FontSize="12"/>
+            <Button Content="Initialize Repository" Margin="0,8,0,0" HorizontalAlignment="Left" Width="150"
+                    Click="OnInit" Background="{StaticResource ChromeBg}" Foreground="{StaticResource Text}"/>
+        </StackPanel>
+
+        <!-- commit box -->
+        <Border x:Name="CommitBox" DockPanel.Dock="Bottom" Background="{StaticResource DeepBg}" Padding="8" Visibility="Collapsed">
+            <DockPanel>
+                <Button DockPanel.Dock="Right" Content="Commit All" Width="90" Margin="6,0,0,0" VerticalAlignment="Bottom"
+                        Click="OnCommit" Background="{StaticResource ChromeBg}" Foreground="{StaticResource Text}"/>
+                <TextBox x:Name="Message" Height="48" AcceptsReturn="True" TextWrapping="Wrap"
+                         Background="{StaticResource AppBg}" Foreground="{StaticResource Text}"
+                         BorderBrush="{StaticResource Divider}" Padding="4"
+                         VerticalScrollBarVisibility="Auto"/>
+            </DockPanel>
+        </Border>
+
+        <!-- changes + log -->
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="140"/>
+            </Grid.RowDefinitions>
+            <ListBox x:Name="Changes" Grid.Row="0" Background="Transparent" BorderThickness="0"
+                     Foreground="{StaticResource Text}" FontFamily="Consolas" FontSize="12"
+                     SelectionChanged="OnPickFile">
+                <ListBox.ItemTemplate>
+                    <DataTemplate><TextBlock Text="{Binding Display}"/></DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+            <TextBlock Grid.Row="1" Text="RECENT COMMITS" Margin="10,6,0,2"
+                       Foreground="{StaticResource Accent}" FontSize="10" FontWeight="SemiBold"/>
+            <TextBox x:Name="LogText" Grid.Row="2" IsReadOnly="True" Background="{StaticResource DeepBg}"
+                     Foreground="{StaticResource TextDim}" BorderThickness="0" FontFamily="Consolas"
+                     FontSize="11" Padding="6,2" VerticalScrollBarVisibility="Auto"/>
+        </Grid>
+    </DockPanel>
+</UserControl>
