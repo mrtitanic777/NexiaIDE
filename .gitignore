@@ -80,3 +80,6 @@ installer/version_generated.h
 # Announcement drafts. These are written here to be copied into Discord by hand,
 # not shipped — a `git add -A` swept one into a commit once.
 discord-*.md
+
+# WPF build intermediates
+nexia-ui/obj/

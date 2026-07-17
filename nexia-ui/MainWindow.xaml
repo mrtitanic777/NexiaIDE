@@ -1,0 +1,98 @@
+<Window x:Class="NexiaUI.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Nexia IDE" Height="740" Width="1100"
+        Background="{StaticResource AppBg}" Foreground="{StaticResource Text}"
+        FontFamily="Segoe UI">
+    <DockPanel>
+        <!-- menu -->
+        <Menu DockPanel.Dock="Top" Background="{StaticResource ChromeBg}" Foreground="{StaticResource Text}">
+            <MenuItem Header="_File" Foreground="Black">
+                <MenuItem Header="Reload from nexia-core" Click="OnReload"/>
+                <Separator/>
+                <MenuItem Header="Save" InputGestureText="Ctrl+S" Click="OnSave"/>
+                <Separator/>
+                <MenuItem Header="Exit" Click="OnExit"/>
+            </MenuItem>
+            <MenuItem Header="_Build" Foreground="Black">
+                <MenuItem Header="Build (Debug)" InputGestureText="F7" Click="OnBuild"/>
+            </MenuItem>
+        </Menu>
+
+        <!-- status bar -->
+        <Border DockPanel.Dock="Bottom" Background="{StaticResource ChromeBg}" Padding="10,4">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="SDK:" Foreground="{StaticResource TextDim}"/>
+                <TextBlock x:Name="SdkText" Margin="6,0,0,0" Foreground="{StaticResource TextDim}"/>
+                <TextBlock Text="Project:" Margin="24,0,0,0" Foreground="{StaticResource TextDim}"/>
+                <TextBlock x:Name="ProjText" Margin="6,0,0,0" Foreground="{StaticResource TextDim}"/>
+                <TextBlock Text="nexia-core" Margin="24,0,0,0" Foreground="{StaticResource Accent}"/>
+                <TextBlock x:Name="StatusText" Margin="24,0,0,0" Foreground="{StaticResource TextDim}"/>
+            </StackPanel>
+        </Border>
+
+        <!-- content: tree | (editor / output) -->
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="270" MinWidth="160"/>
+                <ColumnDefinition Width="4"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Solution Explorer -->
+            <Border Grid.Column="0" Background="{StaticResource PanelBg}">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="SOLUTION EXPLORER" FontWeight="SemiBold"
+                               FontSize="11" Margin="10,8" Foreground="{StaticResource Accent}"/>
+                    <TreeView x:Name="Tree" Background="Transparent" BorderThickness="0"
+                              Foreground="{StaticResource Text}"
+                              SelectedItemChanged="OnTreeSelect">
+                        <TreeView.ItemTemplate>
+                            <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                <TextBlock Text="{Binding Name}"/>
+                            </HierarchicalDataTemplate>
+                        </TreeView.ItemTemplate>
+                    </TreeView>
+                </DockPanel>
+            </Border>
+
+            <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Stretch"
+                          Background="{StaticResource Divider}"/>
+
+            <!-- editor over output -->
+            <Grid Grid.Column="2">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="4"/>
+                    <RowDefinition Height="190" MinHeight="60"/>
+                </Grid.RowDefinitions>
+
+                <Border Grid.Row="0" Background="{StaticResource DeepBg}">
+                    <DockPanel>
+                        <TextBlock x:Name="EditorHeader" DockPanel.Dock="Top" Text="EDITOR"
+                                   FontWeight="SemiBold" FontSize="11" Margin="10,8"
+                                   Foreground="{StaticResource Accent}"/>
+                        <TextBox x:Name="Editor" AcceptsReturn="True" AcceptsTab="True"
+                                 FontFamily="Consolas" FontSize="13"
+                                 Background="{StaticResource DeepBg}" Foreground="{StaticResource Text}"
+                                 BorderThickness="0" Padding="6,0"
+                                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+                    </DockPanel>
+                </Border>
+
+                <GridSplitter Grid.Row="1" Height="4" HorizontalAlignment="Stretch"
+                              Background="{StaticResource Divider}"/>
+
+                <Border Grid.Row="2" Background="#101012">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Top" Text="OUTPUT" FontWeight="SemiBold"
+                                   FontSize="11" Margin="10,8" Foreground="{StaticResource Accent}"/>
+                        <TextBox x:Name="Output" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
+                                 Background="#101012" Foreground="#CCCCCC" BorderThickness="0" Padding="6,0"
+                                 VerticalScrollBarVisibility="Auto" TextWrapping="NoWrap"/>
+                    </DockPanel>
+                </Border>
+            </Grid>
+        </Grid>
+    </DockPanel>
+</Window>
