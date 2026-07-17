@@ -13,6 +13,7 @@
 #include <cstring>
 
 #include "core_bridge.h"
+#include "builder.h"
 #include "app.h"
 #include "ui.h"
 
@@ -33,9 +34,18 @@ static int probe() {
     return 0;
 }
 
+// Headless build: drive the native build loop and print its output.
+static int buildProbe() {
+    core_load_project(kProject);
+    bool ok = core_build(kProject, L"Debug", [](const std::string& s) { fputs(s.c_str(), stdout); });
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
-    for (int i = 1; i < argc; i++)
+    for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--probe")) return probe();
+        if (!strcmp(argv[i], "--build")) return buildProbe();
+    }
 
     core_load_project(kProject);
     return app_run(ui_draw);

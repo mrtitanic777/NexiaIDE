@@ -6,6 +6,7 @@
  */
 #include "ui.h"
 #include "core_bridge.h"
+#include "builder.h"
 #include "imgui.h"
 #include <string>
 
@@ -108,7 +109,11 @@ void ui_draw() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Build")) {
-            ImGui::MenuItem("Build (native loop lands here)", NULL, false, false);
+            if (ImGui::MenuItem("Build (Debug)", "F7") && !g_app.projPath.empty()) {
+                g_output += "\n";
+                core_build(g_app.projPath, L"Debug",
+                           [](const std::string& s) { g_output += s; });
+            }
             ImGui::EndMenu();
         }
         ImGui::EndMenuBar();
